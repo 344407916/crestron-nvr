@@ -1,0 +1,18 @@
+{
+    "NvrIpAddress": "NVR IP Address / Hostname",
+    "NvrPort": "NVR Port",
+    "Username": "Username",
+    "Password": "Password",
+    "ArmAll": "Arm All Cameras",
+    "DisarmAll": "Disarm All Cameras",
+    "MotionDetected": "Motion Detected",
+    "IntrusionDetected": "Intrusion Detected",
+    "TamperDetected": "Tamper Detected",
+    "LineCrossDetected": "Line Cross Detected",
+    "FaceDetected": "Face Detected",
+    "VideoLoss": "Video Loss",
+    "Armed": "Armed",
+    "Disarmed": "Disarmed",
+    "LedOn": "LED On",
+    "LedOff": "LED Off"
+}
