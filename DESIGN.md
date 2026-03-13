@@ -30,16 +30,20 @@
 │  ┌──────────────────▼────────────────────────────┐   │
 │  │        NVR Platform Driver (主驱动)             │   │
 │  │  ┌─────────────┐  ┌────────────────────────┐  │   │
-│  │  │ NVR 连接管理  │  │  告警事件分发 & 布撤防   │  │   │
-│  │  │ (IP/Auth)    │  │  (全局操作)              │  │   │
+│  │  │ NVR 连接管理  │  │  告警接收 & 布撤防       │  │   │
+│  │  │ (IP/Auth)    │  │  (直接上报 Crestron)     │  │   │
 │  │  └─────────────┘  └────────────────────────┘  │   │
+│  │         │                                      │   │
+│  │         │ 接收 NVR 告警 → 直接触发 Programmable│   │
+│  │         │ Events → Crestron Home OS (MC4-R)    │   │
+│  │         │ 在 Actions & Events 中配置联动        │   │
 │  │                                                │   │
 │  │  ┌─ Managed Devices (自动发现) ──────────────┐ │   │
 │  │  │                                            │ │   │
 │  │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐  │ │   │
 │  │  │  │ Camera 1  │ │ Camera 2  │ │ Camera N  │  │ │   │
 │  │  │  │ PTZ/Zoom  │ │ PTZ/Zoom  │ │ PTZ/Zoom  │  │ │   │
-│  │  │  │ LED/Alert │ │ LED/Alert │ │ LED/Alert │  │ │   │
+│  │  │  │ LED       │ │ LED       │ │ LED       │  │ │   │
 │  │  │  │ Arm/Dis   │ │ Arm/Dis   │ │ Arm/Dis   │  │ │   │
 │  │  │  └──────────┘ └──────────┘ └──────────┘  │ │   │
 │  │  └────────────────────────────────────────────┘ │   │
@@ -76,17 +80,16 @@ CrestronNvrDriver/
 │   │   └── NvrDriverFactory.cs           # 驱动工厂（创建子驱动实例）
 │   │
 │   ├── Capabilities/
-│   │   ├── PtzCapability.cs              # PTZ 控制能力
-│   │   ├── ZoomCapability.cs             # Zoom 控制能力
-│   │   ├── LedCapability.cs              # LED 灯控制能力
-│   │   ├── ArmDisarmCapability.cs        # 一键布撤防能力
-│   │   └── AlertCapability.cs            # 告警事件能力
+│   │   ├── PtzCapability.cs              # PTZ 控制能力 (相机子驱动)
+│   │   ├── ZoomCapability.cs             # Zoom 控制能力 (相机子驱动)
+│   │   ├── LedCapability.cs              # LED 灯控制能力 (相机子驱动)
+│   │   └── ArmDisarmCapability.cs        # 一键布撤防能力 (相机+平台)
 │   │
 │   ├── NvrApi/
 │   │   ├── INvrApiClient.cs              # NVR API 接口定义
 │   │   ├── NvrApiClient.cs               # NVR API 实现（伪代码）
 │   │   ├── NvrModels.cs                  # NVR 数据模型
-│   │   └── NvrAlertListener.cs           # NVR 告警监听器
+│   │   └── NvrAlertListener.cs           # NVR 告警监听 → 直接上报 Crestron
 │   │
 │   ├── Configuration/
 │   │   ├── NvrConfigurationStep.cs       # NVR 配置步骤定义
@@ -153,8 +156,12 @@ CrestronNvrDriver/
 // 主驱动 - 作为 Platform 类型，负责：
 // 1. 连接 NVR 并认证
 // 2. 自动发现并注册 NVR 下属相机为 managed devices
-// 3. 接收并分发告警事件
+// 3. 接收 NVR 告警，直接上报 Crestron Home OS（如 MC4-R）
 // 4. 全局布撤防操作
+//
+// 告警处理策略：NVR 推送告警 → Platform Driver 直接触发
+// Programmable Events → Crestron Home OS 接收 → 用户在
+// Actions & Events 中配置联动（无需经过相机子驱动中转）
 
 using Crestron.DeviceDrivers.EntityModel;
 using Crestron.DeviceDrivers.SDK;
@@ -232,7 +239,11 @@ public class NvrPlatformDriver
         }
     }
 
-    // ========== 告警监听与分发 ==========
+    // ========== 告警接收与直接上报 ==========
+    // 设计要点：NVR 告警不经过相机子驱动分发，
+    // 由 Platform Driver 直接触发 Programmable Events，
+    // Crestron Home OS (MC4-R) 直接接收，
+    // 用户在 Crestron Home Setup → Actions & Events 中配置联动。
 
     public void StartAlertListener()
     {
@@ -246,15 +257,12 @@ public class NvrPlatformDriver
 
     private void HandleNvrAlert(NvrAlertEvent alert)
     {
-        // 1. 找到对应的相机子驱动
-        if (_cameraDrivers.TryGetValue(alert.ChannelId, out var cameraDriver))
-        {
-            // 2. 通过相机子驱动触发 Crestron 可编程事件
-            cameraDriver.RaiseAlertEvent(alert);
-        }
+        // 直接在 Platform Driver 层触发 Programmable Event
+        // Crestron Home OS (MC4-R) 会立即收到此事件
+        // 无需经过相机子驱动中转
 
-        // 3. 同时触发平台级别的全局告警事件
-        RaisePlatformAlertEvent(alert);
+        // 触发告警事件 → Crestron Home OS 接收 → Actions & Events 联动
+        RaiseAlertEvent(alert);
     }
 
     // ========== 全局布撤防操作 ==========
@@ -282,24 +290,73 @@ public class NvrPlatformDriver
             cam.UpdateArmState(false);
     }
 
-    // ========== Programmable Events (推送给 Crestron Actions & Events) ==========
+    // ========== Programmable Events (直接上报 Crestron Home OS) ==========
+    // 以下所有事件标记为 Programmable = true，
+    // 会自动出现在 Crestron Home Setup → Actions & Events 页面，
+    // 用户可直接在 MC4-R 等设备上配置联动规则。
 
     // [EntityEventMetadata(Programmable = true)]
-    // 事件: 任意相机产生告警
-    public event EventHandler<AlertEventArgs> OnGlobalAlert;
+    // 事件: 移动侦测告警（携带相机名称、通道号）
+    public event EventHandler<AlertEventArgs> OnMotionDetected;
+
+    // [EntityEventMetadata(Programmable = true)]
+    // 事件: 入侵检测告警
+    public event EventHandler<AlertEventArgs> OnIntrusionDetected;
+
+    // [EntityEventMetadata(Programmable = true)]
+    // 事件: 遮挡检测告警
+    public event EventHandler<AlertEventArgs> OnTamperDetected;
+
+    // [EntityEventMetadata(Programmable = true)]
+    // 事件: 越界检测告警
+    public event EventHandler<AlertEventArgs> OnLineCrossDetected;
+
+    // [EntityEventMetadata(Programmable = true)]
+    // 事件: 人脸检测告警
+    public event EventHandler<AlertEventArgs> OnFaceDetected;
+
+    // [EntityEventMetadata(Programmable = true)]
+    // 事件: 视频丢失告警
+    public event EventHandler<AlertEventArgs> OnVideoLoss;
 
     // [EntityEventMetadata(Programmable = true)]
     // 事件: 全局布防状态变更
     public event EventHandler<ArmStateEventArgs> OnArmStateChanged;
 
-    private void RaisePlatformAlertEvent(NvrAlertEvent alert)
+    // 统一告警分发：NVR 告警 → 直接触发对应的 Programmable Event
+    private void RaiseAlertEvent(NvrAlertEvent alert)
     {
-        OnGlobalAlert?.Invoke(this, new AlertEventArgs
+        var args = new AlertEventArgs
         {
             CameraName = alert.CameraName,
-            AlertType = alert.AlertType.ToString(),    // MotionDetection, Intrusion, etc.
-            Timestamp = alert.Timestamp
-        });
+            ChannelId = alert.ChannelId,
+            AlertType = alert.AlertType.ToString(),
+            Timestamp = alert.Timestamp,
+            Message = alert.Message
+        };
+
+        // 按告警类型触发对应事件，Crestron Home OS 直接接收
+        switch (alert.AlertType)
+        {
+            case AlertType.MotionDetection:
+                OnMotionDetected?.Invoke(this, args);
+                break;
+            case AlertType.Intrusion:
+                OnIntrusionDetected?.Invoke(this, args);
+                break;
+            case AlertType.Tamper:
+                OnTamperDetected?.Invoke(this, args);
+                break;
+            case AlertType.LineCross:
+                OnLineCrossDetected?.Invoke(this, args);
+                break;
+            case AlertType.FaceDetection:
+                OnFaceDetected?.Invoke(this, args);
+                break;
+            case AlertType.VideoLoss:
+                OnVideoLoss?.Invoke(this, args);
+                break;
+        }
     }
 }
 ```
@@ -308,11 +365,14 @@ public class NvrPlatformDriver
 
 ```csharp
 // NvrCameraDriver.cs
-// 相机子驱动 - 作为 Camera 类型 managed device，负责：
-// 1. PTZ 控制 (Pan/Tilt/Zoom)
-// 2. LED 灯控制
-// 3. 单相机布撤防
-// 4. 接收并上报相机级别告警事件
+// 相机子驱动 - 作为 Camera 类型 managed device，仅负责控制：
+// 1. PTZ 控制 (Pan/Tilt)
+// 2. Zoom 控制
+// 3. LED 灯控制
+// 4. 单相机布撤防
+//
+// 注意：告警事件不在此处理，由 NVR Platform Driver 统一接收并
+// 直接上报给 Crestron Home OS (MC4-R)
 
 public class NvrCameraDriver
 {
@@ -474,55 +534,10 @@ public class NvrCameraDriver
     }
 
     // ===================================================================
-    // 告警事件 - 推送给 Crestron Home Actions & Events
+    // 注意：告警事件不在相机子驱动中处理
+    // 所有 NVR 告警由 NvrPlatformDriver 统一接收并直接上报
+    // Crestron Home OS (MC4-R)，无需经过相机子驱动中转
     // ===================================================================
-
-    // [EntityEventMetadata(Programmable = true)]
-    // 事件: 移动侦测告警
-    public event EventHandler<AlertEventArgs> OnMotionDetected;
-
-    // [EntityEventMetadata(Programmable = true)]
-    // 事件: 入侵检测告警
-    public event EventHandler<AlertEventArgs> OnIntrusionDetected;
-
-    // [EntityEventMetadata(Programmable = true)]
-    // 事件: 遮挡检测告警
-    public event EventHandler<AlertEventArgs> OnTamperDetected;
-
-    // [EntityEventMetadata(Programmable = true)]
-    // 事件: 越界检测告警
-    public event EventHandler<AlertEventArgs> OnLineCrossDetected;
-
-    // [EntityEventMetadata(Programmable = true)]
-    // 事件: 布防状态变更
-    public event EventHandler<ArmStateEventArgs> OnArmStateChanged;
-
-    // 内部方法: 由 Platform Driver 调用, 分发告警
-    public void RaiseAlertEvent(NvrAlertEvent alert)
-    {
-        var args = new AlertEventArgs
-        {
-            AlertType = alert.AlertType.ToString(),
-            Timestamp = alert.Timestamp,
-            Message = alert.Message
-        };
-
-        switch (alert.AlertType)
-        {
-            case AlertType.MotionDetection:
-                OnMotionDetected?.Invoke(this, args);
-                break;
-            case AlertType.Intrusion:
-                OnIntrusionDetected?.Invoke(this, args);
-                break;
-            case AlertType.Tamper:
-                OnTamperDetected?.Invoke(this, args);
-                break;
-            case AlertType.LineCross:
-                OnLineCrossDetected?.Invoke(this, args);
-                break;
-        }
-    }
 
     public void UpdateArmState(bool armed)
     {
@@ -613,6 +628,8 @@ public enum ZoomDirection { In, Out }
 ```csharp
 // NvrAlertListener.cs
 // 长连接监听 NVR 推送的告警事件
+// 收到告警后直接回调 Platform Driver，由其触发 Programmable Event
+// Crestron Home OS (MC4-R) 直接接收事件，用户配置联动即可
 
 public class NvrAlertListener
 {
@@ -661,14 +678,18 @@ public class NvrAlertListener
 
 #### 可编程事件 (Events) — 用作触发条件
 
+所有告警事件均由 **NVR Platform Driver 直接上报** Crestron Home OS (MC4-R)，不经过相机子驱动分发。
+事件参数中携带 `CameraName` 和 `ChannelId`，用户可在联动规则中区分来源相机。
+
 | 事件名称 | 级别 | 说明 | 参数 |
 |----------|------|------|------|
-| `OnMotionDetected` | 相机 | 移动侦测告警 | AlertType, Timestamp |
-| `OnIntrusionDetected` | 相机 | 入侵检测告警 | AlertType, Timestamp |
-| `OnTamperDetected` | 相机 | 遮挡检测告警 | AlertType, Timestamp |
-| `OnLineCrossDetected` | 相机 | 越界检测告警 | AlertType, Timestamp |
-| `OnArmStateChanged` | 相机/全局 | 布防状态变更 | IsArmed |
-| `OnGlobalAlert` | 平台 | 任意相机告警 | CameraName, AlertType |
+| `OnMotionDetected` | 平台 | 移动侦测告警 | CameraName, ChannelId, Timestamp |
+| `OnIntrusionDetected` | 平台 | 入侵检测告警 | CameraName, ChannelId, Timestamp |
+| `OnTamperDetected` | 平台 | 遮挡检测告警 | CameraName, ChannelId, Timestamp |
+| `OnLineCrossDetected` | 平台 | 越界检测告警 | CameraName, ChannelId, Timestamp |
+| `OnFaceDetected` | 平台 | 人脸检测告警 | CameraName, ChannelId, Timestamp |
+| `OnVideoLoss` | 平台 | 视频丢失告警 | CameraName, ChannelId, Timestamp |
+| `OnArmStateChanged` | 平台 | 全局布防状态变更 | IsArmed |
 
 #### 可编程命令 (Commands) — 用作执行动作
 
@@ -694,22 +715,34 @@ public class NvrAlertListener
 
 #### 典型联动场景示例
 
+所有告警事件在 NVR Platform Driver 上触发，Crestron Home OS 直接接收：
+
 ```
 场景1: 前门移动侦测 → 开灯 + 发送通知
-  触发: Camera["前门"].OnMotionDetected
+  触发: NVR.OnMotionDetected (CameraName="前门摄像头")
   动作: Light["门廊灯"].TurnOn()
        Notification.Send("前门检测到移动")
+  配置位置: Crestron Home Setup → Actions & Events
 
 场景2: 离家模式 → 一键布防
   触发: Scene["离家模式"].Activated
   动作: NVR.ArmAll()
+  配置位置: Crestron Home Setup → Sequences
 
 场景3: 入侵告警 → 联动安防
-  触发: Camera["后院"].OnIntrusionDetected
-  动作: Camera["后院"].EnableLed()
+  触发: NVR.OnIntrusionDetected (CameraName="后院摄像头")
+  动作: Camera["后院"].EnableLed()     ← 控制命令走相机子驱动
        SecuritySystem.ArmAway()
        Notification.Send("后院入侵告警!")
+  配置位置: Crestron Home Setup → Actions & Events
+
+场景4: 视频丢失 → 报警
+  触发: NVR.OnVideoLoss (CameraName="车库摄像头")
+  动作: Notification.Send("车库摄像头离线!")
+  配置位置: Crestron Home Setup → Actions & Events
 ```
+
+> **数据流**：NVR 设备 → (TCP/IP) → NVR Platform Driver → (Programmable Event) → Crestron Home OS (MC4-R) → Actions & Events 联动执行
 
 ### 6.2 相机自动发现流程
 
@@ -772,8 +805,8 @@ public void ConfigureCameraCapabilities(NvrCameraInfo camInfo)
     // 布撤防 - 所有相机都支持
     AddCapability("armDisarm");  // 自定义能力
 
-    // 告警事件 - 所有相机都支持
-    AddCapability("alert");  // 自定义能力
+    // 注意：告警事件不在相机子驱动注册，
+    // 由 NVR Platform Driver 统一处理并直接上报 Crestron Home OS
 }
 ```
 
@@ -876,10 +909,10 @@ public class ConnectionManager
 11. 实现布撤防控制 (Arm/Disarm/ArmAll/DisarmAll)
 
 ### Phase 4: 告警事件与联动
-12. 实现 NvrAlertListener 告警监听
-13. 实现告警事件分发到各相机子驱动
+12. 实现 NvrAlertListener 告警监听（长连接）
+13. 在 Platform Driver 中实现告警事件直接上报 Crestron Home OS
 14. 标记所有 Programmable 事件/命令/属性
-15. 验证 Actions & Events 在 Crestron Home Setup 中可配置
+15. 验证 Actions & Events 在 Crestron Home Setup (MC4-R) 中可配置联动
 
 ### Phase 5: 稳定性与优化
 16. 实现连接管理与自动重连
