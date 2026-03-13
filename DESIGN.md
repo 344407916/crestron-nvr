@@ -219,16 +219,16 @@ CrestronNvrDriver/
 │                                           │
 │  解析 AlertType:                          │
 │  ┌──────────────────┬────────────────┐   │
-│  │ MotionDetection  │→ 触发 motionDetected event │
-│  │ Intrusion        │→ 触发 intrusionDetected event │
-│  │ Tamper           │→ 触发 tamperDetected event    │
-│  │ LineCross        │→ 触发 lineCrossDetected event │
-│  │ FaceDetection    │→ 触发 faceDetected event      │
-│  │ VideoLoss        │→ 触发 videoLoss event         │
+│  │ MotionDetection  │→ 触发 MotionDetected event │
+│  │ Intrusion        │→ 触发 IntrusionDetected    │
+│  │ Tamper           │→ 触发 TamperDetected       │
+│  │ LineCross        │→ 触发 LineCrossDetected    │
+│  │ FaceDetection    │→ 触发 FaceDetected         │
+│  │ VideoLoss        │→ 触发 VideoLoss event      │
 │  └──────────────────┴────────────────┘   │
 │                                           │
-│  NotifyEvent("nvr:<eventId>",             │
-│    { cameraName, channelId, timestamp })  │
+│  1. 更新告警属性 + NotifyPropertyChanged()│
+│  2. Event?.Invoke(this, EventArgs.Empty)  │
 └──────────────────┬───────────────────────┘
                    │ Programmable Event
                    ▼
@@ -341,13 +341,14 @@ using Crestron.DeviceDrivers.SDK.EntityModel.Attributes;
 using Definitions;
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
+using System.Threading;
 
 public class NvrPlatform : ReflectedAttributeDriverEntity
 {
     private INvrApiClient _nvrClient;
     private NvrAlertListener _alertListener;
     private readonly Dictionary<string, NvrCamera> _cameraEntities = new Dictionary<string, NvrCamera>();
+    private CTimer _pollingTimer;
     private bool _initialized;
 
     public NvrPlatform(DriverControllerCreationArgs args, DriverImplementationResources resources)
@@ -370,37 +371,54 @@ public class NvrPlatform : ReflectedAttributeDriverEntity
     public IDictionary<string, PlatformManagedDevice> ManagedDevices { get; private set; }
 
     // ==================== Programmable Events (告警直接上报) ====================
-    // 标记 Programmable = true → 自动出现在 Crestron Home Actions & Events 页面
+    // [EntityEvent] 声明事件 ID
+    // [EntityEventMetadata(Programmable = true)] 使其出现在 Actions & Events 页面
+    // 触发方式: 先更新属性 + NotifyPropertyChanged(), 再 Invoke() 事件
 
-    [EntityEvent(Id = "nvr:motionDetected", Programmable = true)]
+    [EntityEvent(Id = "nvr:motionDetected")]
+    [EntityEventMetadata(Programmable = true)]
     public event EventHandler MotionDetected;
 
-    [EntityEvent(Id = "nvr:intrusionDetected", Programmable = true)]
+    [EntityEvent(Id = "nvr:intrusionDetected")]
+    [EntityEventMetadata(Programmable = true)]
     public event EventHandler IntrusionDetected;
 
-    [EntityEvent(Id = "nvr:tamperDetected", Programmable = true)]
+    [EntityEvent(Id = "nvr:tamperDetected")]
+    [EntityEventMetadata(Programmable = true)]
     public event EventHandler TamperDetected;
 
-    [EntityEvent(Id = "nvr:lineCrossDetected", Programmable = true)]
+    [EntityEvent(Id = "nvr:lineCrossDetected")]
+    [EntityEventMetadata(Programmable = true)]
     public event EventHandler LineCrossDetected;
 
-    [EntityEvent(Id = "nvr:faceDetected", Programmable = true)]
+    [EntityEvent(Id = "nvr:faceDetected")]
+    [EntityEventMetadata(Programmable = true)]
     public event EventHandler FaceDetected;
 
-    [EntityEvent(Id = "nvr:videoLoss", Programmable = true)]
+    [EntityEvent(Id = "nvr:videoLoss")]
+    [EntityEventMetadata(Programmable = true)]
     public event EventHandler VideoLoss;
 
     // ==================== Programmable Properties ====================
 
-    [EntityProperty(Id = "nvr:allArmed", Programmable = true)]
+    [EntityProperty(Id = "nvr:allArmed")]
+    [EntityPropertyMetadata(Programmable = true)]
     public bool AllArmed { get; private set; }
+
+    // 告警状态属性 (供事件触发前更新)
+    [EntityProperty(Id = "nvr:lastAlertType")]
+    public string LastAlertType { get; private set; }
+
+    [EntityProperty(Id = "nvr:lastAlertCamera")]
+    public string LastAlertCamera { get; private set; }
 
     [EntityProperty(Id = "nvr:connectedCameraCount")]
     public int ConnectedCameraCount { get; private set; }
 
     // ==================== Programmable Commands (全局布撤防) ====================
 
-    [EntityCommand(Id = "nvr:armAll", Programmable = true)]
+    [EntityCommand(Id = "nvr:armAll")]
+    [EntityCommandMetadata(Programmable = true)]
     public void ArmAll()
     {
         // --- NVR 交互伪代码 ---
@@ -414,7 +432,8 @@ public class NvrPlatform : ReflectedAttributeDriverEntity
             cam.UpdateArmState(true);
     }
 
-    [EntityCommand(Id = "nvr:disarmAll", Programmable = true)]
+    [EntityCommand(Id = "nvr:disarmAll")]
+    [EntityCommandMetadata(Programmable = true)]
     public void DisarmAll()
     {
         // --- NVR 交互伪代码 ---
@@ -579,8 +598,16 @@ public class NvrPlatform : ReflectedAttributeDriverEntity
 
     private void HandleNvrAlert(NvrAlertEvent alert)
     {
-        // 直接在 Platform Driver 层触发 Programmable Event
+        // ★ 正确模式：先更新属性 + NotifyPropertyChanged(), 再 Invoke() 事件
         // Crestron Home OS (MC4-R) 直接接收, 无需经过相机子驱动中转
+
+        // 1. 更新告警状态属性
+        LastAlertType = alert.AlertType.ToString();
+        LastAlertCamera = alert.CameraName;
+        NotifyPropertyChanged("nvr:lastAlertType", new DriverEntityValue(LastAlertType));
+        NotifyPropertyChanged("nvr:lastAlertCamera", new DriverEntityValue(LastAlertCamera));
+
+        // 2. 触发对应的 Programmable Event
         switch (alert.AlertType)
         {
             case AlertType.MotionDetection:
@@ -605,25 +632,26 @@ public class NvrPlatform : ReflectedAttributeDriverEntity
     }
 
     // ==================== 轮询 (热插拔检测) ====================
+    // 注意: SDK 要求 LangVersion 3 (C# 3.0), 不支持 async/await, 使用 CTimer
 
-    private async void StartPolling()
+    private void StartPolling()
     {
-        while (true)
+        _pollingTimer = new CTimer(PollingCallback, null, 30000, 30000);
+    }
+
+    private void PollingCallback(object state)
+    {
+        if (!_nvrClient.IsConnected)
         {
-            await Task.Delay(30000); // 每 30 秒
-
-            if (!_nvrClient.IsConnected)
-            {
-                await TryReconnect();
-                continue;
-            }
-
-            // --- NVR 交互伪代码 ---
-            var currentCameras = _nvrClient.GetCameraList();
-            // --- 伪代码结束 ---
-
-            SyncCameraList(currentCameras);
+            TryReconnect();
+            return;
         }
+
+        // --- NVR 交互伪代码 ---
+        var currentCameras = _nvrClient.GetCameraList();
+        // --- 伪代码结束 ---
+
+        SyncCameraList(currentCameras);
     }
 
     private void SyncCameraList(List<NvrCameraInfo> currentCameras)
@@ -648,28 +676,32 @@ public class NvrPlatform : ReflectedAttributeDriverEntity
 
     // ==================== 重连策略 ====================
 
-    private async Task TryReconnect()
+    private int _retryCount;
+
+    private void TryReconnect()
     {
         const int maxRetry = 5;
         const int baseDelayMs = 5000;
 
-        for (int i = 0; i < maxRetry; i++)
-        {
-            try
-            {
-                // --- NVR 交互伪代码 ---
-                _nvrClient.Connect();
-                // --- 伪代码结束 ---
+        if (_retryCount >= maxRetry) return;
 
-                DiscoverAndRegisterCameras();
-                StartAlertListener();
-                return;
-            }
-            catch
-            {
-                int delay = baseDelayMs * (int)Math.Pow(2, i);
-                await Task.Delay(delay);
-            }
+        try
+        {
+            // --- NVR 交互伪代码 ---
+            _nvrClient.Connect();
+            // --- 伪代码结束 ---
+
+            _retryCount = 0;
+            DiscoverAndRegisterCameras();
+            StartAlertListener();
+        }
+        catch
+        {
+            _retryCount++;
+            // 指数退避: 5s, 10s, 20s, 40s, 80s
+            int delay = baseDelayMs * (int)Math.Pow(2, _retryCount);
+            // 使用一次性定时器延迟重试
+            new CTimer(o => TryReconnect(), null, delay);
         }
     }
 }
@@ -767,10 +799,12 @@ public class NvrCamera : ReflectedAttributeDriverEntity
 
     // ==================== LED 灯控制 ====================
 
-    [EntityProperty(Id = "camera:ledEnabled", Programmable = true)]
+    [EntityProperty(Id = "camera:ledEnabled")]
+    [EntityPropertyMetadata(Programmable = true)]
     public bool LedEnabled { get; private set; }
 
-    [EntityCommand(Id = "camera:enableLed", Programmable = true)]
+    [EntityCommand(Id = "camera:enableLed")]
+    [EntityCommandMetadata(Programmable = true)]
     public void EnableLed()
     {
         // --- NVR 交互伪代码 ---
@@ -781,7 +815,8 @@ public class NvrCamera : ReflectedAttributeDriverEntity
         NotifyPropertyChanged("camera:ledEnabled", new DriverEntityValue(true));
     }
 
-    [EntityCommand(Id = "camera:disableLed", Programmable = true)]
+    [EntityCommand(Id = "camera:disableLed")]
+    [EntityCommandMetadata(Programmable = true)]
     public void DisableLed()
     {
         // --- NVR 交互伪代码 ---
@@ -794,10 +829,12 @@ public class NvrCamera : ReflectedAttributeDriverEntity
 
     // ==================== 布撤防 ====================
 
-    [EntityProperty(Id = "camera:armed", Programmable = true)]
+    [EntityProperty(Id = "camera:armed")]
+    [EntityPropertyMetadata(Programmable = true)]
     public bool IsArmed { get; private set; }
 
-    [EntityCommand(Id = "camera:arm", Programmable = true)]
+    [EntityCommand(Id = "camera:arm")]
+    [EntityCommandMetadata(Programmable = true)]
     public void Arm()
     {
         // --- NVR 交互伪代码 ---
@@ -808,7 +845,8 @@ public class NvrCamera : ReflectedAttributeDriverEntity
         NotifyPropertyChanged("camera:armed", new DriverEntityValue(true));
     }
 
-    [EntityCommand(Id = "camera:disarm", Programmable = true)]
+    [EntityCommand(Id = "camera:disarm")]
+    [EntityCommandMetadata(Programmable = true)]
     public void Disarm()
     {
         // --- NVR 交互伪代码 ---
