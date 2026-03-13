@@ -77,7 +77,9 @@ NVR 设备 ──TCP/IP──► NvrPlatform (Platform Driver)
 
 ```
 CrestronNvrDriver/
-├── CrestronNvrDriver.csproj            # SIMPL# Library 项目
+├── CrestronNvrDriver.csproj            # 项目文件 (.NET Framework 4.7.2)
+├── Properties/
+│   └── AssemblyInfo.cs                 # 程序集信息
 │
 ├── EntryPoint.cs                       # 驱动入口 [DriverAssemblyEntryPoint]
 ├── NvrPlatform.cs                      # 平台驱动 (managedDevices / 告警 / 布撤防)
@@ -93,24 +95,98 @@ CrestronNvrDriver/
 │   ├── NvrApiClient.cs                 # NVR API 实现 (伪代码)
 │   └── NvrModels.cs                    # NVR 数据模型
 │
-├── Resources/
-│   └── CrestronNvrDriver.json          # Driver JSON (SchemaVersion 2.0)
+├── CrestronNvrDriver.json              # Driver JSON (SchemaVersion 2.0, 嵌入资源)
 │
 └── Translations/
-    └── en-US.json
+    └── en-US.json                      # 国际化翻译文件
 ```
 
 > **V2 优势**: 子设备 (NvrCamera) 是同项目中的类，无需独立 SIMPL# Library 项目。
-> 构建后生成单个 PKG 文件。
+> 构建后通过 ManifestUtil 生成 PKG 文件。
 
 ---
 
-## 3. NuGet 依赖
+## 3. 项目文件与依赖
+
+### 3.1 CrestronNvrDriver.csproj
 
 ```xml
-<PackageReference Include="Crestron.DeviceDrivers.DevKit" Version="27.*" />
-<PackageReference Include="Crestron.DeviceDrivers.ManifestUtil" Version="27.*" />
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>CrestronNvrDriver</RootNamespace>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <TargetFrameworks>net472</TargetFrameworks>
+    <LangVersion>7.3</LangVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>false</Deterministic>
+    <NoStdLib>true</NoStdLib>
+    <NoConfig>true</NoConfig>
+    <GenerateAssemblyFileVersionAttribute>false</GenerateAssemblyFileVersionAttribute>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateSerializationAssemblies>Off</GenerateSerializationAssemblies>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>portable</DebugType>
+    <Optimize>false</Optimize>
+    <DefineConstants>$(DefineConstants);DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <DebugType>portable</DebugType>
+    <Optimize>true</Optimize>
+    <DefineConstants>$(DefineConstants);TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="mscorlib" />
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <!-- SDK DLL 引用 (从 Crestron SDK 安装目录或 NuGet 包) -->
+    <Reference Include="Crestron.DeviceDrivers.SDK.dll">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>..\packages\Crestron.DeviceDrivers.SDK\lib\Crestron.DeviceDrivers.SDK.dll</HintPath>
+    </Reference>
+    <Reference Include="Crestron.DeviceDrivers.EntityModel.dll">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>..\packages\Crestron.DeviceDrivers.EntityModel\lib\Crestron.DeviceDrivers.EntityModel.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+  <!-- ★ Driver JSON 必须作为嵌入资源 -->
+  <ItemGroup>
+    <EmbeddedResource Include="$(TargetName).json" />
+  </ItemGroup>
+  <!-- ★ 构建后验证签名并生成 Manifest (PKG) -->
+  <Target Name="AfterBuild">
+    <Exec Command="&quot;$(SolutionDir)\packages\ManifestUtil\lib\ManifestUtil.exe&quot; &quot;$(TargetDir)" />
+  </Target>
+</Project>
 ```
+
+> **关键设置**:
+> - `net472` — .NET Framework 4.7.2
+> - `LangVersion: 7.3` — 支持 `?.` 空条件运算符、模式匹配等
+> - `NoStdLib: true` / `NoConfig: true` — Crestron 运行时要求
+> - `EmbeddedResource` — Driver JSON 必须嵌入到程序集中
+> - `ManifestUtil` — 构建后自动生成 PKG 驱动包
+
+### 3.2 Properties/AssemblyInfo.cs
+
+```csharp
+using System.Reflection;
+
+[assembly: AssemblyTitle("CrestronNvrDriver")]
+[assembly: AssemblyCompany("YourCompany")]
+[assembly: AssemblyProduct("CrestronNvrDriver")]
+[assembly: AssemblyCopyright("Copyright © 2026 YourCompany")]
+[assembly: AssemblyVersion("1.0000.0001")]
+```
+
+> `AssemblyVersion` 需与 Driver JSON 中的 `DriverVersion` 保持一致。
 
 ---
 
@@ -632,7 +708,7 @@ public class NvrPlatform : ReflectedAttributeDriverEntity
     }
 
     // ==================== 轮询 (热插拔检测) ====================
-    // 注意: SDK 要求 LangVersion 3 (C# 3.0), 不支持 async/await, 使用 CTimer
+    // 使用 CTimer 替代 CrestronEnvironment.Sleep(), 避免创建多余线程
 
     private void StartPolling()
     {
@@ -703,6 +779,27 @@ public class NvrPlatform : ReflectedAttributeDriverEntity
             // 使用一次性定时器延迟重试
             new CTimer(o => TryReconnect(), null, delay);
         }
+    }
+
+    // ==================== 资源清理 ====================
+
+    public void Dispose()
+    {
+        _pollingTimer?.Stop();
+        _pollingTimer?.Dispose();
+
+        _alertListener?.StopListening();
+
+        foreach (var cam in _cameraEntities.Values)
+        {
+            if (cam is IDisposable disposable)
+                disposable.Dispose();
+        }
+        _cameraEntities.Clear();
+
+        // --- NVR 交互伪代码 ---
+        _nvrClient?.Disconnect();
+        // --- 伪代码结束 ---
     }
 }
 ```
@@ -980,6 +1077,86 @@ public class NvrAlertListener
 }
 ```
 
+### 5.6 Definitions/PlatformManagedDevice.cs
+
+```csharp
+using Crestron.DeviceDrivers.SDK.EntityModel.Attributes;
+
+namespace Definitions
+{
+    /// <summary>
+    /// 子设备描述数据结构，对应 platform:managedDevices 字典中的 value。
+    /// Crestron Home 通过此信息在设备列表中展示子设备。
+    /// </summary>
+    [EntityDataType(Id = "platform:ManagedDevice")]
+    public class PlatformManagedDevice
+    {
+        public PlatformManagedDevice(
+            DeviceUxCategory uxCategory,
+            string name,
+            string manufacturer,
+            string model,
+            string serialNumber)
+        {
+            UxCategory = uxCategory;
+            Name = name;
+            Manufacturer = manufacturer;
+            Model = model;
+            SerialNumber = serialNumber;
+        }
+
+        /// <summary>设备类型 (Camera/Light/Display 等)</summary>
+        [EntityProperty]
+        public DeviceUxCategory UxCategory { get; private set; }
+
+        /// <summary>设备显示名称 (如 "前门摄像头")</summary>
+        [EntityProperty]
+        public string Name { get; private set; }
+
+        /// <summary>制造商</summary>
+        [EntityProperty]
+        public string Manufacturer { get; private set; }
+
+        /// <summary>型号</summary>
+        [EntityProperty]
+        public string Model { get; private set; }
+
+        /// <summary>序列号 (可为 null)</summary>
+        [EntityProperty]
+        public string SerialNumber { get; private set; }
+    }
+}
+```
+
+> `DeviceUxCategory` 枚举直接使用 SDK 内置的定义（含 `Camera`、`Light`、`Display` 等 57 种设备类型），
+> 无需自行定义。如 SDK 版本不含此枚举，可从 SDK Sample 的 `Definitions/DeviceUxCategory.cs` 复制。
+
+### 5.7 Translations/en-US.json
+
+```json
+{
+    "NvrIpAddress": "NVR IP Address / Hostname",
+    "NvrPort": "NVR Port",
+    "Username": "Username",
+    "Password": "Password",
+    "ArmAll": "Arm All Cameras",
+    "DisarmAll": "Disarm All Cameras",
+    "MotionDetected": "Motion Detected",
+    "IntrusionDetected": "Intrusion Detected",
+    "TamperDetected": "Tamper Detected",
+    "LineCrossDetected": "Line Cross Detected",
+    "FaceDetected": "Face Detected",
+    "VideoLoss": "Video Loss",
+    "Armed": "Armed",
+    "Disarmed": "Disarmed",
+    "LedOn": "LED On",
+    "LedOff": "LED Off"
+}
+```
+
+> 翻译文件放在 `Translations/` 目录下，Driver JSON 中的 Title 可用 `^` 前缀引用翻译 key。
+> 如需支持中文，添加 `zh-CN.json` 文件。
+
 ---
 
 ## 6. Driver JSON 清单
@@ -1143,13 +1320,29 @@ public class NvrAlertListener
 
 ## 9. 关键注意事项
 
-1. **不要使用 `CrestronEnvironment.Sleep()`** — 会创建新线程，用 `await Task.Delay()` 替代
-2. **`HttpWebRequest.KeepAlive = false`** — 防止 .NET SDK 内存泄漏
-3. **子设备统一 V2** — Platform Driver 不能混用 V1 和 V2 子设备
-4. **Programmable 仅支持基础类型** — `bool`, `string`, `double`, `int` (不含 `ulong`)
-5. **动态移除需谨慎** — 移除已在 Sequence 中使用的命令会破坏该 Sequence
-6. **线程安全** — ManagedDevices 字典更新时使用 copy-on-write 模式（参见 SDK Sample）
-7. **增量通知优先** — 单个相机增减使用 `DriverEntityValueUpdate`，全量刷新用 `CreateValueForEntries`
+### 构建环境
+1. **Target Framework: `net472`** — .NET Framework 4.7.2
+2. **LangVersion: `7.3`** — 支持 `?.`、模式匹配、`out var` 等特性
+3. **Driver JSON 必须为 EmbeddedResource** — 在 .csproj 中配置 `<EmbeddedResource Include="$(TargetName).json" />`
+4. **ManifestUtil 构建后步骤** — 自动生成 PKG 驱动包，需在 AfterBuild 中调用
+5. **AssemblyVersion 与 DriverVersion 同步** — 两处版本号必须一致
+
+### 运行时
+6. **不要使用 `CrestronEnvironment.Sleep()`** — 会创建新线程，用 `CTimer` 定时器替代
+7. **`HttpWebRequest.KeepAlive = false`** — 防止 .NET SDK 内存泄漏
+8. **子设备统一 V2** — Platform Driver 不能混用 V1 和 V2 子设备
+9. **Programmable 仅支持基础类型** — `bool`, `string`, `double`, `int` (不含 `ulong`)
+10. **线程安全** — ManagedDevices 字典更新时使用 copy-on-write 模式（参见 SDK Sample）
+11. **增量通知优先** — 单个相机增减使用 `DriverEntityValueUpdate`，全量刷新用 `CreateValueForEntries`
+
+### 设计约束
+12. **动态移除需谨慎** — 移除已在 Sequence 中使用的命令会破坏该 Sequence
+13. **Dispose 资源清理** — 驱动卸载时必须停止 CTimer、断开 NVR 连接、取消告警订阅
+14. **Attribute 装饰器模式** — 事件/命令/属性分别用两个 attribute:
+    - `[EntityEvent]` + `[EntityEventMetadata(Programmable = true)]`
+    - `[EntityCommand]` + `[EntityCommandMetadata(Programmable = true)]`
+    - `[EntityProperty]` + `[EntityPropertyMetadata(Programmable = true)]`
+15. **事件触发顺序** — 先更新属性 + `NotifyPropertyChanged()`，再 `Invoke()` 事件
 
 ---
 
