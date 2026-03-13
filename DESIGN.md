@@ -72,37 +72,38 @@
 CrestronNvrDriver/
 ├── CrestronNvrDriver.sln
 │
-├── NvrPlatformDriver/                        # ★ 平台驱动项目 (主项目)
-│   ├── NvrPlatformDriver.csproj              #   SIMPL# Library 项目
-│   ├── NvrGatewayProtocol.cs                 #   继承 AGatewayProtocol (V1)
-│   ├── NvrPlatformDriver.cs                  #   主驱动入口，连接管理/告警上报
-│   ├── NvrAlertListener.cs                   #   告警监听 → 直接上报 Crestron
+├── CrestronNvrDriver/                           # ★ 单一项目（V2 无需拆分子项目）
+│   ├── CrestronNvrDriver.csproj                 #   SIMPL# Library 项目
+│   │
+│   ├── EntryPoint.cs                            #   驱动入口 [DriverAssemblyEntryPoint]
+│   ├── NvrPlatform.cs                           #   平台驱动 (ReflectedAttributeDriverEntity)
+│   │                                            #   managedDevices / 告警上报 / 布撤防
+│   ├── NvrCamera.cs                             #   相机子设备 Entity (同项目中的类)
+│   │                                            #   PTZ / Zoom / LED / 单机布撤防
+│   ├── NvrAlertListener.cs                      #   告警监听 → 回调 Platform 上报
+│   │
+│   ├── Definitions/
+│   │   ├── PlatformManagedDevice.cs             #   managed device 数据结构
+│   │   └── DeviceUxCategory.cs                  #   设备类型枚举 (含 Camera)
+│   │
+│   ├── NvrApi/
+│   │   ├── INvrApiClient.cs                     #   NVR API 接口定义
+│   │   ├── NvrApiClient.cs                      #   NVR API 实现（伪代码）
+│   │   └── NvrModels.cs                         #   NVR 数据模型
+│   │
 │   ├── Resources/
-│   │   └── NvrPlatformDriver.json            #   平台驱动 JSON (含 dependencies)
+│   │   └── CrestronNvrDriver.json               #   Driver JSON (SchemaVersion 2.0)
+│   │
 │   └── Translations/
 │       └── en-US.json
 │
-├── NvrCameraPairedDriver/                    # ★ 相机子驱动项目 (独立项目!)
-│   ├── NvrCameraPairedDriver.csproj          #   SIMPL# Library 项目
-│   ├── NvrCameraPairedDriver.cs              #   继承 ABasicDriver，PTZ/Zoom/LED/布撤防
-│   ├── Resources/
-│   │   └── NvrCameraPairedDriver.json        #   子驱动自己的 JSON 数据文件
-│   └── Translations/
-│       └── en-US.json
-│
-├── NvrApi/                                   # 共享 NVR API 层 (类库项目)
-│   ├── NvrApi.csproj
-│   ├── INvrApiClient.cs                      #   NVR API 接口定义
-│   ├── NvrApiClient.cs                       #   NVR API 实现（伪代码）
-│   └── NvrModels.cs                          #   NVR 数据模型
-│
-└── CrestronNvrDriver.Tests/                  # 单元测试项目
-    ├── NvrPlatformDriverTests.cs
-    └── NvrCameraPairedDriverTests.cs
+└── CrestronNvrDriver.Tests/                     # 单元测试项目
+    ├── NvrPlatformTests.cs
+    └── NvrCameraTests.cs
 ```
 
-> **重要约束**: Crestron SDK 要求子设备驱动必须是**独立的 SIMPL# Pro Library 项目**，
-> 不能仅是主驱动项目中的一个类。构建后，平台驱动的 PKG 文件会自动包含所有子驱动 DLL。
+> **V2 优势**: 子设备（NvrCamera）是同一个项目中的类，**无需独立的 SIMPL# Library 项目**。
+> 相比 V1 (RAD) 大幅简化项目结构。构建后生成单个 PKG 文件。
 
 ---
 
@@ -678,201 +679,242 @@ Crestron SDK 提供了 **Platform Driver（平台/网关驱动）** 的概念，
 
 **这正是 NVR → 相机 的使用场景。** Crestron 官方文档明确支持此模式。
 
-#### 5.5.2 SDK V1 (RAD Framework) 的实现方式 —— 已有明确代码
+#### 5.5.2 SDK V2 (Entity Model) 的实现方式 —— 基于 SDK Sample 确认
 
-V1 SDK 的 Platform Driver 机制**文档最完整**，核心流程如下：
+> 以下代码基于 Crestron SDK v27 中的 `Platform_Sample_TutorialLights_IP` 示例项目，
+> 已确认 V2 Entity Model 的 Platform Driver **完全支持**子设备动态注册。
+
+V2 的子设备注册是**数据驱动**的，不需要 V1 的 `AddPairedDevice()` 方法调用：
 
 ```
-步骤1: 主驱动继承 AGatewayProtocol
-步骤2: 子驱动继承 ABasicDriver，包含 GatewayPairedDeviceInformation
-步骤3: 主驱动调用 AddPairedDevice() 注册子设备
-步骤4: SDK 自动通知 Crestron Home，子设备出现在设备列表
+步骤1: Platform 类继承 ReflectedAttributeDriverEntity
+步骤2: 定义 platform:managedDevices 字典属性
+步骤3: 创建子设备 Entity + 描述信息 (PlatformManagedDevice)
+步骤4: 调用 UpdateSubControllers() 注册子控制器
+步骤5: 调用 NotifyPropertyChanged("platform:managedDevices") 通知 Crestron Home
 ```
 
-**核心代码（基于官方文档）：**
+**核心代码（基于 SDK Sample 改写为 NVR 场景）：**
 
 ```csharp
-// ===== 1. 平台驱动 (NVR) - 继承 AGatewayProtocol =====
+// ===== 1. NVR 平台驱动 - 继承 ReflectedAttributeDriverEntity =====
 
-public class NvrGatewayProtocol : AGatewayProtocol
+public class NvrPlatform : ReflectedAttributeDriverEntity
 {
-    public NvrGatewayProtocol(ISerialTransport transport, byte id)
-        : base(transport, id)
+    private INvrApiClient _nvrClient;
+
+    public NvrPlatform(DriverControllerCreationArgs args, DriverImplementationResources resources)
+        : base(DriverController.RootControllerId)
     {
+        var cfgArgs = DataDrivenConfigurationControllerArgs.FromResources(args, resources, ControllerId);
+        ConfigurationController = new DelegateDataDrivenConfigurationController(
+            cfgArgs, ApplyConfigurationItems, null, null);
     }
 
-    // 发现并注册相机
-    private void DiscoverAndAddCameras()
+    internal DataDrivenConfigurationController ConfigurationController { get; private set; }
+
+    // ★ 关键属性：managed devices 字典 ★
+    // Crestron Home 通过监听此属性的变化来更新设备列表
+    [EntityProperty(
+        Id = "platform:managedDevices",
+        Type = DriverEntityValueType.DeviceDictionary,
+        ItemTypeRef = "platform:ManagedDevice"
+    )]
+    public IDictionary<string, PlatformManagedDevice> ManagedDevices { get; private set; }
+
+    // 配置回调：用户输入 NVR IP/Port 后触发
+    private ConfigurationItemErrors ApplyConfigurationItems(
+        DataDrivenConfigurationController.ApplyConfigurationAction action,
+        string stepId,
+        IDictionary<string, DriverEntityValue?> values)
+    {
+        if (action == DataDrivenConfigurationController.ApplyConfigurationAction.ApplyAll
+            || action == DataDrivenConfigurationController.ApplyConfigurationAction.ApplyStep)
+        {
+            string host = values["_Host_"].Value.GetValue<string>();
+            ushort port = (ushort)values["_Port_"].Value.GetValue<long>();
+            string username = values["_Username_"].Value.GetValue<string>();
+            string password = values["_Password_"].Value.GetValue<string>();
+
+            // --- NVR 交互伪代码 ---
+            _nvrClient = new NvrApiClient(host, port, username, password);
+            _nvrClient.Connect();
+            // --- 伪代码结束 ---
+
+            DiscoverAndRegisterCameras();
+        }
+        return null;
+    }
+
+    // ★ 相机发现与注册 ★
+    private void DiscoverAndRegisterCameras()
     {
         // --- NVR 交互伪代码 ---
         var cameras = _nvrClient.GetCameraList();
         // --- 伪代码结束 ---
 
+        var controllersToAdd = new List<ConfigurableDriverEntity>();
+        var managedDevices = new Dictionary<string, PlatformManagedDevice>();
+
         foreach (var camInfo in cameras)
         {
-            // 创建相机子驱动实例（独立的 SIMPL# Library 项目）
-            var cameraPairedDriver = new NvrCameraPairedDriver(
-                camInfo.ChannelId,   // 唯一 ID
-                camInfo.Name         // 显示名称，如 "前门摄像头"
-            );
+            // 1. 创建相机子设备 Entity（同一个项目中的类，无需独立项目!）
+            var cameraEntity = new NvrCamera(camInfo.ChannelId, _nvrClient, camInfo);
 
-            // ★ 关键调用：注册子设备到 Crestron Home ★
-            // AddPairedDevice 是 AGatewayProtocol 基类提供的方法
-            // 调用后，SDK 自动通知 Crestron Home，相机出现在设备列表中
-            AddPairedDevice(
-                cameraPairedDriver.PairedDeviceInformation,  // 设备标识信息
-                cameraPairedDriver                            // 驱动实例
+            // 2. 注册子控制器
+            controllersToAdd.Add(new ConfigurableDriverEntity(
+                cameraEntity.ControllerId, cameraEntity, null));
+
+            // 3. 创建设备描述信息
+            //    ★ UxCategory = DeviceUxCategory.Camera ★
+            //    Crestron Home 会将其识别为相机类型设备!
+            managedDevices[camInfo.ChannelId] = new PlatformManagedDevice(
+                DeviceUxCategory.Camera,        // ← 相机类型!
+                camInfo.Name,                    // "前门摄像头"
+                "YourCompany",                   // 制造商
+                camInfo.Model,                   // 型号
+                camInfo.ChannelId                // 序列号
             );
         }
+
+        // 4. 批量注册所有子控制器（一次性通知，性能更优）
+        UpdateSubControllers(controllersToAdd, null);
+
+        // 5. 通知 Crestron Home 更新设备列表
+        ManagedDevices = managedDevices;
+        NotifyPropertyChanged("platform:managedDevices", CreateValueForEntries(ManagedDevices));
     }
 
-    // 移除相机（相机离线或被删除时）
-    private void RemoveCamera(string channelId)
+    // ★ 动态新增相机（NVR 新接入相机时）★
+    public void AddCamera(NvrCameraInfo camInfo)
     {
-        RemovePairedDevice(channelId);
-        // SDK 自动从 Crestron Home 设备列表中移除
+        var cameraEntity = new NvrCamera(camInfo.ChannelId, _nvrClient, camInfo);
+        UpdateSubControllers(
+            new[] { new ConfigurableDriverEntity(cameraEntity.ControllerId, cameraEntity, null) },
+            null);
+
+        var device = new PlatformManagedDevice(
+            DeviceUxCategory.Camera, camInfo.Name, "YourCompany", camInfo.Model, camInfo.ChannelId);
+
+        var copy = new Dictionary<string, PlatformManagedDevice>(ManagedDevices);
+        copy[camInfo.ChannelId] = device;
+        ManagedDevices = copy;
+
+        // 增量通知（仅通知新增的设备，效率更高）
+        NotifyPropertyChanged("platform:managedDevices",
+            DriverEntityValueUpdate.Create(
+                DriverEntityValueUpdate.Create(camInfo.ChannelId, CreateValueForObject(device))
+            ));
     }
 
-    // 平台驱动被移除时，必须清理所有子设备
-    protected override void Dispose(bool disposing)
+    // ★ 动态移除相机（相机从 NVR 移除时）★
+    public void RemoveCamera(string channelId)
     {
-        if (disposing)
-        {
-            // 移除所有已注册的子设备
-            foreach (var camera in _pairedCameras)
-            {
-                RemovePairedDevice(camera.Key);
-                camera.Value.Dispose();
-            }
-        }
-        base.Dispose(disposing);
+        var copy = new Dictionary<string, PlatformManagedDevice>(ManagedDevices);
+        copy.Remove(channelId);
+        ManagedDevices = copy;
+
+        // 通知 Crestron Home 移除设备
+        NotifyPropertyChanged("platform:managedDevices",
+            DriverEntityValueUpdate.Create(
+                DriverEntityValueUpdate.CreateDeletion(channelId)
+            ));
+
+        // 移除子控制器
+        UpdateSubControllers(null, new[] { channelId });
     }
 }
 
-// ===== 2. 相机子驱动 - 独立的 SIMPL# Library 项目 =====
+// ===== 2. 相机子设备 Entity（同一个项目中的类）=====
 
-public class NvrCameraPairedDriver : ABasicDriver  // 或具体的 Extension Driver
+public class NvrCamera : ReflectedAttributeDriverEntity
 {
-    private GatewayPairedDeviceInformation _pairedDeviceInfo;
+    private INvrApiClient _nvrClient;
+    private NvrCameraInfo _camInfo;
 
-    public NvrCameraPairedDriver(string deviceId, string deviceName)
+    public NvrCamera(string controllerId, INvrApiClient nvrClient, NvrCameraInfo camInfo)
+        : base(controllerId)
     {
-        // GatewayPairedDeviceInformation 用于在网关中标识此设备
-        _pairedDeviceInfo = new GatewayPairedDeviceInformation(deviceId, deviceName);
+        _nvrClient = nvrClient;
+        _camInfo = camInfo;
     }
 
-    // 平台驱动通过此属性获取设备标识
-    public GatewayPairedDeviceInformation PairedDeviceInformation
-    {
-        get { return _pairedDeviceInfo; }
-    }
-
-    // ... PTZ、Zoom、LED、布撤防 等控制方法 ...
+    // PTZ、Zoom、LED、布撤防 等命令和属性...
+    // 使用 [EntityCommand] 和 [EntityProperty] 装饰
 }
-```
 
-#### 5.5.3 项目结构要求（重要约束）
+// ===== 3. 入口点 =====
 
-Crestron SDK 要求 **子设备驱动必须是独立的 SIMPL# Pro Library 项目**，不能仅是主驱动项目中的一个类：
+[assembly: DriverAssemblyEntryPoint(typeof(EntryPoint))]
 
-```
-CrestronNvrDriver.sln
-├── NvrPlatformDriver/                    # 平台驱动项目 (主项目)
-│   ├── NvrPlatformDriver.csproj
-│   ├── NvrGatewayProtocol.cs            # 继承 AGatewayProtocol
-│   ├── NvrPlatformDriver.json           # 平台 JSON，包含 Dependencies 引用子驱动
-│   └── ...
-│
-├── NvrCameraPairedDriver/                # 相机子驱动项目 (独立项目!)
-│   ├── NvrCameraPairedDriver.csproj
-│   ├── NvrCameraPairedDriver.cs         # 继承 ABasicDriver
-│   ├── NvrCameraPairedDriver.json       # 子驱动自己的 JSON 数据文件
-│   └── ...
-│
-└── NvrApi/                               # 共享的 NVR API 层（可选独立项目）
-    ├── INvrApiClient.cs
-    └── NvrModels.cs
-```
-
-**平台驱动 JSON 中必须声明子驱动依赖：**
-
-```json
+public sealed class EntryPoint : DriverAssemblyEntryPoint
 {
-  "deviceType": "Platform",
-  "dependencies": [
+    public override DriverController CreateDriverControllerInstance(DriverControllerCreationArgs args)
     {
-      "fileName": "NvrCameraPairedDriver.dll",
-      "type": "PairedDevice"
+        var resources = DriverImplementationResources.FromCreationArgs(args, typeof(EntryPoint));
+        var driverEntity = new NvrPlatform(args, resources);
+        var entity = new ConfigurableDriverEntity(
+            driverEntity.ControllerId, driverEntity, driverEntity.ConfigurationController);
+        return new DispatchingDeviceController(entity, args, null);
     }
-  ]
 }
 ```
 
-**构建输出：** 构建平台驱动时，会生成一个 PKG 文件，其中**包含所有子驱动的 DLL**。只需加载平台驱动的 PKG 文件即可，子驱动的 PKG 可以忽略。
-
-#### 5.5.4 SDK V2 (Entity Model) 的情况
-
-V2 SDK 同样支持 Platform Driver + managed devices 模式：
-- 官方文档明确提到："A driver supporting the platform capabilities can advertise multiple managed subdevices"
-- "The list of managed devices may change at any time"
-- SDK v25 新增了 "Configure Child Devices" 文档
-
-**但存在的不确定性：**
-- V2 的具体 API 方法名（等价于 V1 的 `AddPairedDevice`）未在公开搜索结果中找到
-- V2 Platform Driver 的完整代码示例在 SDK 下载包的 Sample 目录中，需要下载 Crestron Drivers SDK v27 查看
-- V2 的 Camera 子设备类型是否可以作为 Platform 的 managed device，需实际验证
-
-#### 5.5.5 推荐方案：采用 V1 SDK (RAD Framework)
-
-基于以上分析，**相机注册部分建议使用 V1 SDK**，理由：
+#### 5.5.3 V2 vs V1 对比（基于 SDK Sample 确认）
 
 | 因素 | V1 (RAD) | V2 (Entity Model) |
 |------|---------|-------------------|
-| Platform Driver API | ✅ `AGatewayProtocol.AddPairedDevice` 明确 | ⚠️ 具体 API 需下载 SDK 确认 |
-| 代码示例 | ✅ 官方文档有完整代码 | ⚠️ 需从 SDK Sample 获取 |
-| Camera 子设备类型 | ⚠️ 无原生 Camera 类型，用 Extension | ✅ 原生 Camera 类型 |
-| 子设备动态增删 | ✅ Add/Remove/UpdatePairedDevice | ✅ managed device list 动态变化 |
+| 子设备注册 | `AGatewayProtocol.AddPairedDevice()` | `UpdateSubControllers()` + `NotifyPropertyChanged()` |
+| 子设备移除 | `RemovePairedDevice()` | `DriverEntityValueUpdate.CreateDeletion()` + `UpdateSubControllers()` |
+| 项目结构 | ⚠️ **子驱动必须是独立项目** | ✅ **子设备可以是同项目中的类** |
+| Camera 类型 | ⚠️ 无原生 Camera，用 Extension | ✅ `DeviceUxCategory.Camera` 原生支持 |
+| 配置方式 | UserAttributes + Initialize | 声明式 JSON + `ApplyConfigurationItems` 回调 |
+| 设备描述 | `GatewayPairedDeviceInformation` | `PlatformManagedDevice(UxCategory, Name, ...)` |
+| 增量通知 | 不支持 | ✅ `DriverEntityValueUpdate` 支持增量更新 |
 
-**最终建议：**
-1. **如果 Camera 原生类型不是刚需** → 用 V1 SDK，子设备作为 Extension 类型，开发确定性最高
-2. **如果必须用 Camera 原生类型** → 用 V2 SDK，但需要先下载 SDK v27 查看 Platform Sample 确认 API
-3. **混合方案不可行** → 官方明确说明 "Platform drivers cannot contain both V1 and V2 child device types"
+#### 5.5.4 最终方案：确认采用 V2 SDK (Entity Model)
 
-#### 5.5.6 完整注册流程图
+基于 SDK Sample 的分析，**V2 在所有方面都优于 V1**：
+1. ✅ `DeviceUxCategory.Camera` 原生存在 — 子设备会在 Crestron Home 中显示为相机
+2. ✅ 子设备是同一个项目中的类 — **无需独立项目**，大幅简化项目结构
+3. ✅ 支持增量通知 — 新增/删除单个相机时只通知变化部分
+4. ✅ 声明式配置 — JSON 定义配置步骤，代码只处理回调
+5. ✅ 数据驱动 — 属性装饰器定义能力，更类型安全
+
+#### 5.5.5 完整注册流程图 (V2 Entity Model)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Crestron Home OS (MC4-R)                  │
 │                                                              │
-│  设备列表自动更新 ◄──── SDK 内部机制自动通知                   │
+│  监听 platform:managedDevices 属性变化 → 自动更新设备列表      │
 │  ┌─────────┐ ┌─────────┐ ┌─────────┐                       │
 │  │ 前门相机  │ │ 后院相机  │ │ 车库相机  │  ← 自动出现          │
+│  │ (Camera) │ │ (Camera) │ │ (Camera) │  (DeviceUxCategory)  │
 │  └─────────┘ └─────────┘ └─────────┘                       │
 └──────────────────────────┬──────────────────────────────────┘
                            │
-            SDK 自动管理设备注册/注销
+        NotifyPropertyChanged("platform:managedDevices")
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
-│            NVR Platform Driver (网关驱动)                     │
+│            NVR Platform Driver (V2 Entity Model)             │
 │                                                              │
-│  1. 安装到 Crestron 处理器 (CP4/MC4-R)                       │
+│  1. 安装 PKG 到 Crestron 处理器 (CP4/MC4-R)                 │
 │  2. 用户在 Home Setup 中添加 NVR 设备                        │
-│  3. 输入 NVR IP/Port/用户名/密码                             │
-│  4. 驱动连接 NVR → 获取相机列表                              │
-│  5. 对每个相机调用 AddPairedDevice()                         │
-│     ┌──────────────────────────────────┐                     │
-│     │ AddPairedDevice(                  │                     │
-│     │   pairedDeviceInfo,  // 设备标识  │                     │
-│     │   cameraDriver       // 驱动实例  │                     │
-│     │ )                                 │                     │
-│     └──────────────────────────────────┘                     │
-│  6. SDK 自动将相机注册到 Crestron Home 设备列表               │
+│  3. 输入 NVR IP/Port/用户名/密码 (JSON ConfigurationSteps)   │
+│  4. ApplyConfigurationItems 回调 → 连接 NVR → 获取相机列表   │
+│  5. 对每个相机:                                              │
+│     a. new NvrCamera(channelId, ...) → 创建子 Entity         │
+│     b. new PlatformManagedDevice(Camera, name, ...)          │
+│     c. UpdateSubControllers() → 注册子控制器                  │
+│     d. NotifyPropertyChanged("platform:managedDevices")      │
+│  6. Crestron Home 自动将相机添加到设备列表                    │
 │  7. 用户无需手动添加每个相机                                  │
 │                                                              │
 │  相机热插拔:                                                  │
-│  - 新增相机 → AddPairedDevice() → 自动出现                   │
-│  - 移除相机 → RemovePairedDevice() → 自动消失                │
-│  - 信息变更 → UpdatePairedDevice() → 自动更新                │
+│  - 新增: UpdateSubControllers([new], null) + ValueUpdate     │
+│  - 移除: ValueUpdate.CreateDeletion() + UpdateSubControllers │
+│  - 改名: DriverEntityValueUpdate.Create("name", newValue)    │
 └──────────────────────────┬──────────────────────────────────┘
                            │ TCP/IP
                     ┌──────▼──────┐
@@ -881,22 +923,21 @@ V2 SDK 同样支持 Platform Driver + managed devices 模式：
                     └─────────────┘
 ```
 
-#### 5.5.7 需要验证的事项
+#### 5.5.6 需要验证的事项
 
-在正式开发前，建议先验证以下几点：
+在真实 Crestron 处理器上测试时，需确认：
 
-1. **下载 Crestron Drivers SDK v27**
-   - 查看 `/SDK/Samples/Samples.zip` 中的 Platform Sample 项目
-   - 确认 V2 Entity Model 的 Platform Driver 子设备注册 API
+1. **`DeviceUxCategory.Camera` 子设备的 UI 表现**
+   - 相机设备是否有专属图标和 UI 布局
+   - PTZ/Zoom 控件是否与 SDK 内置的 Camera 控件一致
 
-2. **确认 Camera 类型可否作为 Platform 子设备**
-   - V2 SDK 的 Camera 类型是否能作为 Platform 的 managed device
-   - 如果不行，需要改用 Extension 类型代替
+2. **子设备能力的 Programmable 支持**
+   - 子设备的 `[EntityCommand]` 和 `[EntityProperty]` 是否出现在 Actions & Events
+   - Platform 级别和子设备级别的事件/命令是否同时可用
 
-3. **在真实 Crestron 处理器上测试**
-   - AddPairedDevice 后，子设备是否立即出现在 Crestron Home App 中
+3. **设备分配**
    - 子设备是否可以被分配到不同房间
-   - 子设备的 Programmable 事件/命令是否可用
+   - 子设备是否可以独立重命名
 
 ---
 
