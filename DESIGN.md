@@ -1,0 +1,916 @@
+# Crestron Home OS NVR Driver - Implementation Design
+
+## 1. Architecture Overview
+
+### 1.1 SDK Selection: V2 (Entity Model)
+
+**Recommended: SDK V2 (Entity Model)**，理由如下：
+
+| 对比项 | SDK V1 (RAD Framework) | SDK V2 (Entity Model) |
+|--------|----------------------|----------------------|
+| Camera 设备类型 | 不支持（仅支持 Display/CableBox/AVR 等） | 原生支持（v23.x 起） |
+| Platform Driver（父子设备） | 支持，通过 `AddPairedDevice` | 支持，通过 managed device list |
+| Events/Actions 可编程 | 通过 Extension Events | 原生 `Programmable = true` 属性装饰 |
+| 配置流程 | UserAttributes + Initialize 接口 | 统一 Configuration Flow |
+| SDK 维护 | 维护模式，不再新增设备类型 | 活跃开发，最新 v27 |
+| 所需程序集 | 多个 RAD 程序集 | 仅 `EntityModel` + `SDK` |
+
+**结论**：采用 SDK V2 (Entity Model) 架构，使用 **Platform Driver + Camera 子设备** 模式。
+
+### 1.2 Driver 整体架构
+
+```
+┌─────────────────────────────────────────────────────┐
+│              Crestron Home OS (CP4/VC4)              │
+│  ┌───────────────────────────────────────────────┐   │
+│  │          Actions & Events / Sequences          │   │
+│  │  (告警联动、一键布防触发场景等)                    │   │
+│  └──────────────────┬────────────────────────────┘   │
+│                     │ Programmable Events/Commands    │
+│  ┌──────────────────▼────────────────────────────┐   │
+│  │        NVR Platform Driver (主驱动)             │   │
+│  │  ┌─────────────┐  ┌────────────────────────┐  │   │
+│  │  │ NVR 连接管理  │  │  告警事件分发 & 布撤防   │  │   │
+│  │  │ (IP/Auth)    │  │  (全局操作)              │  │   │
+│  │  └─────────────┘  └────────────────────────┘  │   │
+│  │                                                │   │
+│  │  ┌─ Managed Devices (自动发现) ──────────────┐ │   │
+│  │  │                                            │ │   │
+│  │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐  │ │   │
+│  │  │  │ Camera 1  │ │ Camera 2  │ │ Camera N  │  │ │   │
+│  │  │  │ PTZ/Zoom  │ │ PTZ/Zoom  │ │ PTZ/Zoom  │  │ │   │
+│  │  │  │ LED/Alert │ │ LED/Alert │ │ LED/Alert │  │ │   │
+│  │  │  │ Arm/Dis   │ │ Arm/Dis   │ │ Arm/Dis   │  │ │   │
+│  │  │  └──────────┘ └──────────┘ └──────────┘  │ │   │
+│  │  └────────────────────────────────────────────┘ │   │
+│  └────────────────────────────────────────────────┘   │
+│                     │ TCP/IP                          │
+└─────────────────────┼────────────────────────────────┘
+                      │
+              ┌───────▼───────┐
+              │   NVR Device   │
+              │  (Your NVR)    │
+              └───────────────┘
+```
+
+### 1.3 设备类型映射
+
+| 概念 | Crestron SDK V2 设备类型 | 说明 |
+|------|------------------------|------|
+| NVR 主机 | **Platform** | 网关/平台设备，管理子设备列表 |
+| NVR 下属相机 | **Camera** (managed device) | 原生 Camera 类型，支持 PTZ/Zoom |
+
+---
+
+## 2. 项目结构
+
+```
+CrestronNvrDriver/
+├── CrestronNvrDriver.sln
+├── CrestronNvrDriver/
+│   ├── CrestronNvrDriver.csproj          # SIMPL# Library 项目
+│   │
+│   ├── Driver/
+│   │   ├── NvrPlatformDriver.cs          # 主驱动入口 (Platform Driver)
+│   │   ├── NvrCameraDriver.cs            # 相机子驱动 (Camera Device)
+│   │   └── NvrDriverFactory.cs           # 驱动工厂（创建子驱动实例）
+│   │
+│   ├── Capabilities/
+│   │   ├── PtzCapability.cs              # PTZ 控制能力
+│   │   ├── ZoomCapability.cs             # Zoom 控制能力
+│   │   ├── LedCapability.cs              # LED 灯控制能力
+│   │   ├── ArmDisarmCapability.cs        # 一键布撤防能力
+│   │   └── AlertCapability.cs            # 告警事件能力
+│   │
+│   ├── NvrApi/
+│   │   ├── INvrApiClient.cs              # NVR API 接口定义
+│   │   ├── NvrApiClient.cs               # NVR API 实现（伪代码）
+│   │   ├── NvrModels.cs                  # NVR 数据模型
+│   │   └── NvrAlertListener.cs           # NVR 告警监听器
+│   │
+│   ├── Configuration/
+│   │   ├── NvrConfigurationStep.cs       # NVR 配置步骤定义
+│   │   └── ConfigurationConstants.cs     # 配置常量
+│   │
+│   ├── Resources/
+│   │   └── CrestronNvrDriver.json        # Driver JSON 清单文件
+│   │
+│   └── Translations/
+│       └── en-US.json                    # 翻译文件
+│
+└── CrestronNvrDriver.Tests/             # 单元测试项目
+    ├── NvrPlatformDriverTests.cs
+    └── NvrCameraDriverTests.cs
+```
+
+---
+
+## 3. NuGet 依赖
+
+```xml
+<PackageReference Include="Crestron.DeviceDrivers.DevKit" Version="27.*" />
+<PackageReference Include="Crestron.DeviceDrivers.ManifestUtil" Version="27.*" />
+```
+
+> `DevKit` 包含 `Crestron.DeviceDrivers.EntityModel` 和 `Crestron.DeviceDrivers.SDK` 所有引用。
+> `ManifestUtil` 在构建后自动生成 manifest。
+
+---
+
+## 4. Driver JSON 清单 (CrestronNvrDriver.json)
+
+```json
+{
+  "driverSchemaVersion": "2.0",
+  "manufacturer": "YourCompany",
+  "model": "NVR-Series",
+  "deviceType": "Platform",
+  "version": "1.0.0",
+  "sdkVersion": "27.0",
+  "developer": {
+    "name": "YourCompany",
+    "url": "https://yourcompany.com"
+  },
+  "description": "NVR Driver for Crestron Home OS - manages IP cameras with PTZ, alerts and arm/disarm",
+  "transport": "Ip",
+  "configuration": {
+    "isNotOfflineConfigurable": false
+  },
+  "managedDevices": {
+    "deviceTypes": ["Camera"]
+  }
+}
+```
+
+---
+
+## 5. 核心模块设计
+
+### 5.1 NVR Platform Driver (主驱动)
+
+```csharp
+// NvrPlatformDriver.cs
+// 主驱动 - 作为 Platform 类型，负责：
+// 1. 连接 NVR 并认证
+// 2. 自动发现并注册 NVR 下属相机为 managed devices
+// 3. 接收并分发告警事件
+// 4. 全局布撤防操作
+
+using Crestron.DeviceDrivers.EntityModel;
+using Crestron.DeviceDrivers.SDK;
+
+public class NvrPlatformDriver
+{
+    private INvrApiClient _nvrClient;
+    private NvrAlertListener _alertListener;
+    private Dictionary<string, NvrCameraDriver> _cameraDrivers;
+
+    // ========== 配置流程 (替代 V1 UserAttributes) ==========
+
+    // 配置步骤1: NVR 连接信息
+    // 通过 Entity Model Configuration Flow 统一处理
+    // 配置项:
+    //   - nvrHost: string (NVR IP 地址)
+    //   - nvrPort: int (NVR 端口, 默认 8000)
+    //   - username: string (认证用户名)
+    //   - password: string (认证密码, 标记为密码类型)
+    //   - pollingInterval: int (轮询间隔秒数, 默认 30)
+
+    public ConfigurationStep GetNextConfigurationStep(string currentStepId)
+    {
+        // 步骤1: NVR 连接参数
+        if (currentStepId == null)
+        {
+            return new ConfigurationStep("nvr_connection")
+            {
+                Items = {
+                    new ConfigurationItem("nvrHost", ConfigType.String, "NVR IP Address"),
+                    new ConfigurationItem("nvrPort", ConfigType.Integer, "NVR Port") { DefaultValue = 8000 },
+                    new ConfigurationItem("username", ConfigType.String, "Username"),
+                    new ConfigurationItem("password", ConfigType.Password, "Password"),
+                }
+            };
+        }
+
+        // 步骤2: 连接验证 & 相机发现
+        if (currentStepId == "nvr_connection")
+        {
+            // 尝试连接 NVR 并发现相机
+            ConnectAndDiscoverCameras();
+            return null; // 配置完成
+        }
+
+        return null;
+    }
+
+    // ========== 相机自动发现 ==========
+
+    public void ConnectAndDiscoverCameras()
+    {
+        // --- NVR 交互伪代码 (已实现部分) ---
+        _nvrClient = new NvrApiClient(config.Host, config.Port, config.Username, config.Password);
+        _nvrClient.Connect();
+
+        List<NvrCameraInfo> cameras = _nvrClient.GetCameraList();
+        // --- 伪代码结束 ---
+
+        foreach (var camInfo in cameras)
+        {
+            // 创建 Camera 类型的 managed device
+            var cameraDriver = new NvrCameraDriver(camInfo, _nvrClient);
+            _cameraDrivers[camInfo.ChannelId] = cameraDriver;
+
+            // 通过 Entity Model API 注册子设备
+            // SDK 会自动将其添加到 Crestron Home 设备列表
+            AddManagedDevice(new ManagedDeviceInfo
+            {
+                DeviceType = "Camera",
+                Id = camInfo.ChannelId,
+                Name = camInfo.Name,       // e.g. "前门摄像头"
+                Driver = cameraDriver
+            });
+        }
+    }
+
+    // ========== 告警监听与分发 ==========
+
+    public void StartAlertListener()
+    {
+        _alertListener = new NvrAlertListener(_nvrClient);
+        _alertListener.OnAlert += HandleNvrAlert;
+
+        // --- NVR 交互伪代码 ---
+        _alertListener.StartListening();  // 长连接监听 NVR 告警推送
+        // --- 伪代码结束 ---
+    }
+
+    private void HandleNvrAlert(NvrAlertEvent alert)
+    {
+        // 1. 找到对应的相机子驱动
+        if (_cameraDrivers.TryGetValue(alert.ChannelId, out var cameraDriver))
+        {
+            // 2. 通过相机子驱动触发 Crestron 可编程事件
+            cameraDriver.RaiseAlertEvent(alert);
+        }
+
+        // 3. 同时触发平台级别的全局告警事件
+        RaisePlatformAlertEvent(alert);
+    }
+
+    // ========== 全局布撤防操作 ==========
+
+    // [EntityCommandMetadata(Programmable = true)]
+    // 标记为 Programmable 使其出现在 Crestron Home Sequences 中
+    public void ArmAll()
+    {
+        // --- NVR 交互伪代码 ---
+        _nvrClient.SetAllCamerasArmed(true);
+        // --- 伪代码结束 ---
+
+        foreach (var cam in _cameraDrivers.Values)
+            cam.UpdateArmState(true);
+    }
+
+    // [EntityCommandMetadata(Programmable = true)]
+    public void DisarmAll()
+    {
+        // --- NVR 交互伪代码 ---
+        _nvrClient.SetAllCamerasArmed(false);
+        // --- 伪代码结束 ---
+
+        foreach (var cam in _cameraDrivers.Values)
+            cam.UpdateArmState(false);
+    }
+
+    // ========== Programmable Events (推送给 Crestron Actions & Events) ==========
+
+    // [EntityEventMetadata(Programmable = true)]
+    // 事件: 任意相机产生告警
+    public event EventHandler<AlertEventArgs> OnGlobalAlert;
+
+    // [EntityEventMetadata(Programmable = true)]
+    // 事件: 全局布防状态变更
+    public event EventHandler<ArmStateEventArgs> OnArmStateChanged;
+
+    private void RaisePlatformAlertEvent(NvrAlertEvent alert)
+    {
+        OnGlobalAlert?.Invoke(this, new AlertEventArgs
+        {
+            CameraName = alert.CameraName,
+            AlertType = alert.AlertType.ToString(),    // MotionDetection, Intrusion, etc.
+            Timestamp = alert.Timestamp
+        });
+    }
+}
+```
+
+### 5.2 NVR Camera Driver (相机子驱动)
+
+```csharp
+// NvrCameraDriver.cs
+// 相机子驱动 - 作为 Camera 类型 managed device，负责：
+// 1. PTZ 控制 (Pan/Tilt/Zoom)
+// 2. LED 灯控制
+// 3. 单相机布撤防
+// 4. 接收并上报相机级别告警事件
+
+public class NvrCameraDriver
+{
+    private NvrCameraInfo _cameraInfo;
+    private INvrApiClient _nvrClient;
+
+    // ===================================================================
+    // PTZ 控制 - 映射到 Entity Model Camera 能力
+    // 对应 Camera API: cameraPan, cameraTilt 能力
+    // ===================================================================
+
+    // [EntityCommandMetadata(Programmable = true)]
+    // 命令: cameraPan:left
+    public void PanLeft(int speed = 50)
+    {
+        // --- NVR 交互伪代码 ---
+        _nvrClient.PtzControl(_cameraInfo.ChannelId, PtzDirection.Left, speed);
+        // --- 伪代码结束 ---
+    }
+
+    // [EntityCommandMetadata(Programmable = true)]
+    // 命令: cameraPan:right
+    public void PanRight(int speed = 50)
+    {
+        // --- NVR 交互伪代码 ---
+        _nvrClient.PtzControl(_cameraInfo.ChannelId, PtzDirection.Right, speed);
+        // --- 伪代码结束 ---
+    }
+
+    // 命令: cameraTilt:up
+    public void TiltUp(int speed = 50)
+    {
+        // --- NVR 交互伪代码 ---
+        _nvrClient.PtzControl(_cameraInfo.ChannelId, PtzDirection.Up, speed);
+        // --- 伪代码结束 ---
+    }
+
+    // 命令: cameraTilt:down
+    public void TiltDown(int speed = 50)
+    {
+        // --- NVR 交互伪代码 ---
+        _nvrClient.PtzControl(_cameraInfo.ChannelId, PtzDirection.Down, speed);
+        // --- 伪代码结束 ---
+    }
+
+    // 命令: 停止 PTZ 移动
+    public void PtzStop()
+    {
+        // --- NVR 交互伪代码 ---
+        _nvrClient.PtzStop(_cameraInfo.ChannelId);
+        // --- 伪代码结束 ---
+    }
+
+    // ===================================================================
+    // Zoom 控制 - 映射到 Entity Model Camera imageZoom 能力
+    // ===================================================================
+
+    // 命令: imageZoom:zoomIn
+    public void ZoomIn(int speed = 50)
+    {
+        // --- NVR 交互伪代码 ---
+        _nvrClient.ZoomControl(_cameraInfo.ChannelId, ZoomDirection.In, speed);
+        // --- 伪代码结束 ---
+    }
+
+    // 命令: imageZoom:zoomOut
+    public void ZoomOut(int speed = 50)
+    {
+        // --- NVR 交互伪代码 ---
+        _nvrClient.ZoomControl(_cameraInfo.ChannelId, ZoomDirection.Out, speed);
+        // --- 伪代码结束 ---
+    }
+
+    // 命令: imageZoom:zoomStop
+    public void ZoomStop()
+    {
+        // --- NVR 交互伪代码 ---
+        _nvrClient.ZoomStop(_cameraInfo.ChannelId);
+        // --- 伪代码结束 ---
+    }
+
+    // 属性: imageZoom:level (当前缩放级别, 0.0-1.0)
+    // [EntityPropertyMetadata(Programmable = true)]
+    public double ZoomLevel
+    {
+        get
+        {
+            // --- NVR 交互伪代码 ---
+            return _nvrClient.GetZoomLevel(_cameraInfo.ChannelId);
+            // --- 伪代码结束 ---
+        }
+    }
+
+    // ===================================================================
+    // LED 灯控制 - 通过 Extension 自定义能力实现
+    // (Camera API 无原生 LED 能力, 使用自定义命令)
+    // ===================================================================
+
+    // [EntityPropertyMetadata(Programmable = true)]
+    // 自定义属性: LED 灯状态
+    public bool IsLedEnabled { get; private set; }
+
+    // [EntityCommandMetadata(Programmable = true)]
+    // 自定义命令: 开启 LED 补光灯
+    public void EnableLed()
+    {
+        // --- NVR 交互伪代码 ---
+        _nvrClient.SetLedState(_cameraInfo.ChannelId, true);
+        // --- 伪代码结束 ---
+
+        IsLedEnabled = true;
+        NotifyPropertyChanged(nameof(IsLedEnabled));
+    }
+
+    // [EntityCommandMetadata(Programmable = true)]
+    // 自定义命令: 关闭 LED 补光灯
+    public void DisableLed()
+    {
+        // --- NVR 交互伪代码 ---
+        _nvrClient.SetLedState(_cameraInfo.ChannelId, false);
+        // --- 伪代码结束 ---
+
+        IsLedEnabled = false;
+        NotifyPropertyChanged(nameof(IsLedEnabled));
+    }
+
+    // ===================================================================
+    // 一键布撤防 - 通过自定义命令实现
+    // ===================================================================
+
+    // [EntityPropertyMetadata(Programmable = true)]
+    // 自定义属性: 布防状态
+    public bool IsArmed { get; private set; }
+
+    // [EntityCommandMetadata(Programmable = true)]
+    // 自定义命令: 布防 (开启移动侦测、入侵检测等)
+    public void Arm()
+    {
+        // --- NVR 交互伪代码 ---
+        _nvrClient.SetCameraArmed(_cameraInfo.ChannelId, true);
+        // --- 伪代码结束 ---
+
+        IsArmed = true;
+        NotifyPropertyChanged(nameof(IsArmed));
+        OnArmStateChanged?.Invoke(this, new ArmStateEventArgs { IsArmed = true });
+    }
+
+    // [EntityCommandMetadata(Programmable = true)]
+    // 自定义命令: 撤防
+    public void Disarm()
+    {
+        // --- NVR 交互伪代码 ---
+        _nvrClient.SetCameraArmed(_cameraInfo.ChannelId, false);
+        // --- 伪代码结束 ---
+
+        IsArmed = false;
+        NotifyPropertyChanged(nameof(IsArmed));
+        OnArmStateChanged?.Invoke(this, new ArmStateEventArgs { IsArmed = false });
+    }
+
+    // ===================================================================
+    // 告警事件 - 推送给 Crestron Home Actions & Events
+    // ===================================================================
+
+    // [EntityEventMetadata(Programmable = true)]
+    // 事件: 移动侦测告警
+    public event EventHandler<AlertEventArgs> OnMotionDetected;
+
+    // [EntityEventMetadata(Programmable = true)]
+    // 事件: 入侵检测告警
+    public event EventHandler<AlertEventArgs> OnIntrusionDetected;
+
+    // [EntityEventMetadata(Programmable = true)]
+    // 事件: 遮挡检测告警
+    public event EventHandler<AlertEventArgs> OnTamperDetected;
+
+    // [EntityEventMetadata(Programmable = true)]
+    // 事件: 越界检测告警
+    public event EventHandler<AlertEventArgs> OnLineCrossDetected;
+
+    // [EntityEventMetadata(Programmable = true)]
+    // 事件: 布防状态变更
+    public event EventHandler<ArmStateEventArgs> OnArmStateChanged;
+
+    // 内部方法: 由 Platform Driver 调用, 分发告警
+    public void RaiseAlertEvent(NvrAlertEvent alert)
+    {
+        var args = new AlertEventArgs
+        {
+            AlertType = alert.AlertType.ToString(),
+            Timestamp = alert.Timestamp,
+            Message = alert.Message
+        };
+
+        switch (alert.AlertType)
+        {
+            case AlertType.MotionDetection:
+                OnMotionDetected?.Invoke(this, args);
+                break;
+            case AlertType.Intrusion:
+                OnIntrusionDetected?.Invoke(this, args);
+                break;
+            case AlertType.Tamper:
+                OnTamperDetected?.Invoke(this, args);
+                break;
+            case AlertType.LineCross:
+                OnLineCrossDetected?.Invoke(this, args);
+                break;
+        }
+    }
+
+    public void UpdateArmState(bool armed)
+    {
+        IsArmed = armed;
+        NotifyPropertyChanged(nameof(IsArmed));
+    }
+}
+```
+
+### 5.3 NVR API 接口层 (伪代码)
+
+```csharp
+// INvrApiClient.cs
+// NVR API 接口定义 - 所有与 NVR 的交互抽象
+
+public interface INvrApiClient
+{
+    // 连接与认证
+    void Connect();
+    void Disconnect();
+    bool IsConnected { get; }
+
+    // 相机发现
+    List<NvrCameraInfo> GetCameraList();
+
+    // PTZ 控制
+    void PtzControl(string channelId, PtzDirection direction, int speed);
+    void PtzStop(string channelId);
+
+    // Zoom 控制
+    void ZoomControl(string channelId, ZoomDirection direction, int speed);
+    void ZoomStop(string channelId);
+    double GetZoomLevel(string channelId);
+
+    // LED 控制
+    void SetLedState(string channelId, bool enabled);
+    bool GetLedState(string channelId);
+
+    // 布撤防
+    void SetCameraArmed(string channelId, bool armed);
+    void SetAllCamerasArmed(bool armed);
+    bool GetCameraArmState(string channelId);
+
+    // 告警订阅
+    event EventHandler<NvrAlertEvent> OnAlertReceived;
+    void SubscribeAlerts();
+    void UnsubscribeAlerts();
+}
+
+// NvrModels.cs
+public class NvrCameraInfo
+{
+    public string ChannelId { get; set; }    // 通道 ID
+    public string Name { get; set; }          // 相机名称
+    public string IpAddress { get; set; }     // 相机 IP
+    public string Model { get; set; }         // 相机型号
+    public bool SupportsPtz { get; set; }     // 是否支持 PTZ
+    public bool SupportsLed { get; set; }     // 是否支持 LED
+    public bool IsOnline { get; set; }        // 是否在线
+}
+
+public class NvrAlertEvent
+{
+    public string ChannelId { get; set; }
+    public string CameraName { get; set; }
+    public AlertType AlertType { get; set; }
+    public DateTime Timestamp { get; set; }
+    public string Message { get; set; }
+}
+
+public enum AlertType
+{
+    MotionDetection,    // 移动侦测
+    Intrusion,          // 入侵检测
+    Tamper,             // 遮挡检测
+    LineCross,          // 越界检测
+    FaceDetection,      // 人脸检测
+    AudioException,     // 音频异常
+    VideoLoss           // 视频丢失
+}
+
+public enum PtzDirection { Up, Down, Left, Right, UpLeft, UpRight, DownLeft, DownRight }
+public enum ZoomDirection { In, Out }
+```
+
+### 5.4 NVR 告警监听器
+
+```csharp
+// NvrAlertListener.cs
+// 长连接监听 NVR 推送的告警事件
+
+public class NvrAlertListener
+{
+    private INvrApiClient _nvrClient;
+    private bool _isListening;
+
+    public event Action<NvrAlertEvent> OnAlert;
+
+    public NvrAlertListener(INvrApiClient nvrClient)
+    {
+        _nvrClient = nvrClient;
+    }
+
+    public void StartListening()
+    {
+        _isListening = true;
+
+        // --- NVR 交互伪代码 ---
+        // 订阅 NVR 告警推送 (通常为长连接 HTTP/WebSocket/私有协议)
+        _nvrClient.OnAlertReceived += (sender, alert) =>
+        {
+            OnAlert?.Invoke(alert);
+        };
+        _nvrClient.SubscribeAlerts();
+        // --- 伪代码结束 ---
+    }
+
+    public void StopListening()
+    {
+        _isListening = false;
+
+        // --- NVR 交互伪代码 ---
+        _nvrClient.UnsubscribeAlerts();
+        // --- 伪代码结束 ---
+    }
+}
+```
+
+---
+
+## 6. Crestron Home 集成细节
+
+### 6.1 Actions & Events 联动配置
+
+通过 `Programmable = true` 属性标记，以下事件和命令会自动出现在 Crestron Home Setup 的 **Actions & Events** 页面：
+
+#### 可编程事件 (Events) — 用作触发条件
+
+| 事件名称 | 级别 | 说明 | 参数 |
+|----------|------|------|------|
+| `OnMotionDetected` | 相机 | 移动侦测告警 | AlertType, Timestamp |
+| `OnIntrusionDetected` | 相机 | 入侵检测告警 | AlertType, Timestamp |
+| `OnTamperDetected` | 相机 | 遮挡检测告警 | AlertType, Timestamp |
+| `OnLineCrossDetected` | 相机 | 越界检测告警 | AlertType, Timestamp |
+| `OnArmStateChanged` | 相机/全局 | 布防状态变更 | IsArmed |
+| `OnGlobalAlert` | 平台 | 任意相机告警 | CameraName, AlertType |
+
+#### 可编程命令 (Commands) — 用作执行动作
+
+| 命令名称 | 级别 | 说明 |
+|----------|------|------|
+| `Arm` | 相机 | 单相机布防 |
+| `Disarm` | 相机 | 单相机撤防 |
+| `ArmAll` | 平台 | 全部相机一键布防 |
+| `DisarmAll` | 平台 | 全部相机一键撤防 |
+| `EnableLed` | 相机 | 开启补光灯 |
+| `DisableLed` | 相机 | 关闭补光灯 |
+| `PanLeft/Right` | 相机 | PTZ 水平转动 |
+| `TiltUp/Down` | 相机 | PTZ 垂直转动 |
+| `ZoomIn/Out` | 相机 | 缩放控制 |
+
+#### 可编程属性 (Properties) — 用作条件判断
+
+| 属性名称 | 类型 | 说明 |
+|----------|------|------|
+| `IsArmed` | bool | 当前布防状态 |
+| `IsLedEnabled` | bool | LED 灯状态 |
+| `ZoomLevel` | double | 当前缩放级别 |
+
+#### 典型联动场景示例
+
+```
+场景1: 前门移动侦测 → 开灯 + 发送通知
+  触发: Camera["前门"].OnMotionDetected
+  动作: Light["门廊灯"].TurnOn()
+       Notification.Send("前门检测到移动")
+
+场景2: 离家模式 → 一键布防
+  触发: Scene["离家模式"].Activated
+  动作: NVR.ArmAll()
+
+场景3: 入侵告警 → 联动安防
+  触发: Camera["后院"].OnIntrusionDetected
+  动作: Camera["后院"].EnableLed()
+       SecuritySystem.ArmAway()
+       Notification.Send("后院入侵告警!")
+```
+
+### 6.2 相机自动发现流程
+
+```
+┌──────────┐    配置 NVR IP/Port/Auth    ┌──────────────┐
+│ Crestron  │ ──────────────────────────► │ NVR Platform  │
+│ Home Setup│                             │ Driver        │
+└──────────┘                             └───────┬──────┘
+                                                  │
+                                          Connect & Auth
+                                                  │
+                                          ┌───────▼──────┐
+                                          │   NVR Device   │
+                                          └───────┬──────┘
+                                                  │
+                                          GetCameraList()
+                                                  │
+                                          ┌───────▼──────────────────┐
+                                          │ 返回相机列表:              │
+                                          │  CH1: 前门 (PTZ, LED)     │
+                                          │  CH2: 后院 (PTZ, LED)     │
+                                          │  CH3: 车库 (固定)         │
+                                          └───────┬──────────────────┘
+                                                  │
+                                     对每个相机调用 AddManagedDevice()
+                                                  │
+┌──────────┐    设备列表自动刷新          ┌───────▼──────┐
+│ Crestron  │ ◄──────────────────────── │ Crestron Home │
+│ Home App  │    显示 3 个相机设备        │ Device List   │
+└──────────┘                             └──────────────┘
+```
+
+### 6.3 动态能力适配
+
+相机能力根据 NVR 返回的设备信息动态注册：
+
+```csharp
+// 根据相机实际能力动态注册/移除 capabilities
+public void ConfigureCameraCapabilities(NvrCameraInfo camInfo)
+{
+    // PTZ 能力 - 仅 PTZ 相机注册
+    if (camInfo.SupportsPtz)
+    {
+        AddCapability("cameraPan");    // Pan 控制
+        AddCapability("cameraTilt");   // Tilt 控制
+    }
+
+    // Zoom 能力 - 仅支持变焦的相机注册
+    if (camInfo.SupportsPtz)  // PTZ 相机通常支持 Zoom
+    {
+        AddCapability("imageZoom");
+    }
+
+    // LED 能力 - 仅支持 LED 的相机注册
+    if (camInfo.SupportsLed)
+    {
+        AddCapability("led");  // 自定义能力
+    }
+
+    // 布撤防 - 所有相机都支持
+    AddCapability("armDisarm");  // 自定义能力
+
+    // 告警事件 - 所有相机都支持
+    AddCapability("alert");  // 自定义能力
+}
+```
+
+---
+
+## 7. Configuration Flow 详细设计
+
+```
+┌─────────────────────────────────────────────┐
+│         Step 1: NVR Connection               │
+│                                              │
+│  NVR IP Address:  [192.168.1.100          ]  │
+│  NVR Port:        [8000                   ]  │
+│  Username:        [admin                  ]  │
+│  Password:        [********               ]  │
+│                                              │
+│               [Next]                         │
+└──────────────────┬──────────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────────┐
+│    Step 2: Connection Test & Discovery       │
+│                                              │
+│  ✓ Connected to NVR successfully             │
+│  ✓ Found 3 cameras:                          │
+│    - CH1: 前门摄像头 (PTZ, LED)              │
+│    - CH2: 后院摄像头 (PTZ, LED)              │
+│    - CH3: 车库摄像头 (Fixed)                 │
+│                                              │
+│  Polling Interval: [30] seconds              │
+│  Auto Arm on Connect: [No ▼]                 │
+│                                              │
+│               [Finish]                       │
+└─────────────────────────────────────────────┘
+```
+
+---
+
+## 8. 错误处理与重连策略
+
+```csharp
+// 连接状态管理
+public class ConnectionManager
+{
+    private const int MAX_RETRY = 5;
+    private const int BASE_RETRY_INTERVAL_MS = 5000;  // 5 秒
+
+    public async void MaintainConnection()
+    {
+        int retryCount = 0;
+
+        while (true)
+        {
+            if (!_nvrClient.IsConnected)
+            {
+                try
+                {
+                    // --- NVR 交互伪代码 ---
+                    _nvrClient.Connect();
+                    // --- 伪代码结束 ---
+
+                    retryCount = 0;
+                    RefreshCameraList();    // 重连后刷新相机列表
+                    StartAlertListener();   // 重新订阅告警
+                }
+                catch (Exception ex)
+                {
+                    retryCount++;
+                    int delay = BASE_RETRY_INTERVAL_MS * (int)Math.Pow(2, Math.Min(retryCount, MAX_RETRY));
+                    // 指数退避重试, 最大约 160 秒
+                    await Task.Delay(delay);
+                }
+            }
+
+            await Task.Delay(30000);  // 每 30 秒检查连接
+        }
+    }
+}
+```
+
+---
+
+## 9. 实现路线图
+
+### Phase 1: 基础骨架 (Driver 项目搭建)
+1. 创建 SIMPL# Library 项目，引用 NuGet 包
+2. 编写 Driver JSON 清单文件
+3. 实现 NvrPlatformDriver 基础框架（配置流程）
+4. 实现 NvrApiClient 接口定义及伪代码实现
+
+### Phase 2: 相机自动发现
+5. 实现 Platform Driver 的 managed device 注册
+6. 实现 NvrCameraDriver 基础框架
+7. 实现动态能力注册逻辑
+
+### Phase 3: 相机控制能力
+8. 实现 PTZ 控制 (Pan/Tilt/Stop)
+9. 实现 Zoom 控制 (ZoomIn/ZoomOut/Level)
+10. 实现 LED 灯控制 (Enable/Disable)
+11. 实现布撤防控制 (Arm/Disarm/ArmAll/DisarmAll)
+
+### Phase 4: 告警事件与联动
+12. 实现 NvrAlertListener 告警监听
+13. 实现告警事件分发到各相机子驱动
+14. 标记所有 Programmable 事件/命令/属性
+15. 验证 Actions & Events 在 Crestron Home Setup 中可配置
+
+### Phase 5: 稳定性与优化
+16. 实现连接管理与自动重连
+17. 实现相机列表动态更新（热插拔）
+18. 错误处理与日志
+
+---
+
+## 10. 关键注意事项
+
+1. **不要使用 `CrestronEnvironment.Sleep()`**：会创建新线程，多实例时有性能问题，使用 `await Task.Delay()` 或定时器替代。
+
+2. **HttpWebRequest 设置 `KeepAlive = false`**：防止 .NET SDK 内存泄漏。
+
+3. **Platform Driver 不能混用 V1 和 V2 子设备类型**：所有子设备必须统一为 V2 Entity Model。
+
+4. **Programmable 属性仅支持基础类型**：`bool`, `string`, `double`, `int`（不含 `ulong`）。
+
+5. **动态移除能力需谨慎**：移除一个已经在用户 Sequence 中使用的命令会破坏该 Sequence。建议仅在配置阶段进行能力增减。
+
+6. **Driver JSON 中 `driverSchemaVersion` 必须为 `"2.0"`**。
+
+---
+
+## 参考资料
+
+- [Crestron Drivers Developer Microsite](https://sdkcon78221.crestron.com/sdk/Crestron_Certified_Drivers_SDK/Content/Topics/Home.htm)
+- [Driver SDK V2 (Entity Model)](https://sdkcon78221.crestron.com/sdk/Crestron_Certified_Drivers_SDK/Content/Topics/Driver-SDK-V2/Driver-SDK-V2.htm)
+- [Entity Model API Reference](https://sdkcon78221.crestron.com/sdk/Crestron_Certified_Drivers_SDK/Content/Topics/Driver-SDK-V2/API-Reference/Entity-Model-API-Reference.htm)
+- [Camera API](https://sdkcon78221.crestron.com/sdk/Crestron_Certified_Drivers_SDK/Content/Topics/Driver-SDK-V2/Create-a-Driver/Device-Types/Camera/Camera-API.htm)
+- [Platform Drivers](https://sdkcon78221.crestron.com/sdk/Crestron_Certified_Drivers_SDK/Content/Topics/Driver-SDK-V2/Create-a-Driver/Device-Types/Platform/Platform-Drivers.htm)
+- [Crestron Home Programming (Sequences)](https://sdkcon78221.crestron.com/sdk/Crestron_Certified_Drivers_SDK/Content/Topics/Driver-SDK-V2/Create-a-Driver/Crestron-Home-Sequences.htm)
+- [Configuration Flow](https://sdkcon78221.crestron.com/sdk/Crestron_Certified_Drivers_SDK/Content/Topics/Driver-SDK-V2/SDK-Framework/Configuration-Flow.htm)
+- [SDK Architecture Versions](https://sdkcon78221.crestron.com/sdk/Crestron_Certified_Drivers_SDK/Content/Topics/Overview/SDK-Architecture-Versions.htm)
