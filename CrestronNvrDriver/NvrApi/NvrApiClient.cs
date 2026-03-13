@@ -241,6 +241,58 @@ namespace CrestronNvrDriver.NvrApi
             // --- 伪代码结束 ---
         }
 
+        // ========================================================================================
+        // 单相机告警开关
+        // ========================================================================================
+
+        public void SetCameraAlertEnabled(string channelId, bool enabled)
+        {
+            // --- NVR 交互伪代码 ---
+            // 示例: PUT http://{_host}:{_port}/api/cameras/{channelId}/alert
+            //       Body: { "enabled": true/false }
+            // 启用/禁用该相机在 NVR 侧的告警上报
+            // --- 伪代码结束 ---
+        }
+
+        public bool GetCameraAlertEnabled(string channelId)
+        {
+            // --- NVR 交互伪代码 ---
+            // 示例: GET http://{_host}:{_port}/api/cameras/{channelId}/alert
+            return true;
+            // --- 伪代码结束 ---
+        }
+
+        // ========================================================================================
+        // HDMI 输出控制
+        // ========================================================================================
+
+        public void SetHdmiOutputChannel(string channelId)
+        {
+            // --- NVR 交互伪代码 ---
+            // 示例: PUT http://{_host}:{_port}/api/hdmi/output
+            //       Body: { "mode": "single", "channelId": "{channelId}" }
+            // 切换 NVR HDMI 输出为指定相机的全屏画面
+            // --- 伪代码结束 ---
+        }
+
+        public void SetHdmiOutputMultiView()
+        {
+            // --- NVR 交互伪代码 ---
+            // 示例: PUT http://{_host}:{_port}/api/hdmi/output
+            //       Body: { "mode": "multiView" }
+            // 切换 NVR HDMI 输出为多画面分割模式
+            // --- 伪代码结束 ---
+        }
+
+        public void ResetHdmiOutput()
+        {
+            // --- NVR 交互伪代码 ---
+            // 示例: PUT http://{_host}:{_port}/api/hdmi/output
+            //       Body: { "mode": "default" }
+            // 恢复 NVR HDMI 输出为默认画面
+            // --- 伪代码结束 ---
+        }
+
         /// <summary>
         /// 供测试使用: 手动触发告警事件
         /// </summary>

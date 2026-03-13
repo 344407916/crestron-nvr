@@ -30,6 +30,7 @@ namespace CrestronNvrDriver
             // 初始化状态
             IsArmed = false;
             LedEnabled = false;
+            AlertEnabled = true; // 默认接收告警
             ZoomLevel = 0.0;
             IsOnline = camInfo.IsOnline;
         }
@@ -170,6 +171,51 @@ namespace CrestronNvrDriver
 
             LedEnabled = false;
             NotifyPropertyChanged("camera:ledEnabled", new DriverEntityValue(false));
+        }
+
+        // ========================================================================================
+        // 单相机告警开关
+        // 控制是否接收该相机的告警 (NvrPlatform 在 HandleNvrAlert 中检查此属性)
+        // ========================================================================================
+
+        [EntityProperty(Id = "camera:alertEnabled")]
+        [EntityPropertyMetadata(Programmable = true)]
+        public bool AlertEnabled { get; private set; }
+
+        [EntityCommand(Id = "camera:enableAlert")]
+        [EntityCommandMetadata(Programmable = true)]
+        public void EnableAlert()
+        {
+            // --- NVR 交互伪代码 ---
+            _nvrClient.SetCameraAlertEnabled(_camInfo.ChannelId, true);
+            // --- 伪代码结束 ---
+
+            AlertEnabled = true;
+            NotifyPropertyChanged("camera:alertEnabled", new DriverEntityValue(true));
+        }
+
+        [EntityCommand(Id = "camera:disableAlert")]
+        [EntityCommandMetadata(Programmable = true)]
+        public void DisableAlert()
+        {
+            // --- NVR 交互伪代码 ---
+            _nvrClient.SetCameraAlertEnabled(_camInfo.ChannelId, false);
+            // --- 伪代码结束 ---
+
+            AlertEnabled = false;
+            NotifyPropertyChanged("camera:alertEnabled", new DriverEntityValue(false));
+        }
+
+        /// <summary>
+        /// 供 NvrPlatform 调用: 全局告警开关时同步各相机状态
+        /// </summary>
+        internal void UpdateAlertEnabled(bool enabled)
+        {
+            if (AlertEnabled != enabled)
+            {
+                AlertEnabled = enabled;
+                NotifyPropertyChanged("camera:alertEnabled", new DriverEntityValue(enabled));
+            }
         }
 
         // ========================================================================================

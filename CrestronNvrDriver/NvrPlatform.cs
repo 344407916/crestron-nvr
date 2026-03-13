@@ -100,6 +100,16 @@ namespace CrestronNvrDriver
         [EntityPropertyMetadata(Programmable = true)]
         public bool AllArmed { get; private set; }
 
+        /// <summary>全局告警订阅开关: 是否接收 NVR 告警</summary>
+        [EntityProperty(Id = "nvr:alertSubscribed")]
+        [EntityPropertyMetadata(Programmable = true)]
+        public bool AlertSubscribed { get; private set; }
+
+        /// <summary>HDMI 联动开关: 告警触发时是否自动切换 NVR HDMI 输出</summary>
+        [EntityProperty(Id = "nvr:hdmiLinkageEnabled")]
+        [EntityPropertyMetadata(Programmable = true)]
+        public bool HdmiLinkageEnabled { get; private set; }
+
         [EntityProperty(Id = "nvr:lastAlertType")]
         public string LastAlertType { get; private set; }
 
@@ -145,6 +155,93 @@ namespace CrestronNvrDriver
             {
                 cam.UpdateArmState(false);
             }
+        }
+
+        // ========================================================================================
+        // Programmable Commands — 全局告警订阅/取消订阅
+        // ========================================================================================
+
+        [EntityCommand(Id = "nvr:subscribeAlerts")]
+        [EntityCommandMetadata(Programmable = true)]
+        public void SubscribeAllAlerts()
+        {
+            // --- NVR 交互伪代码 ---
+            _nvrClient.SubscribeAlerts();
+            // --- 伪代码结束 ---
+
+            AlertSubscribed = true;
+            NotifyPropertyChanged("nvr:alertSubscribed", new DriverEntityValue(true));
+
+            // 同步各相机告警开关
+            foreach (var cam in _cameraEntities.Values)
+            {
+                cam.UpdateAlertEnabled(true);
+            }
+        }
+
+        [EntityCommand(Id = "nvr:unsubscribeAlerts")]
+        [EntityCommandMetadata(Programmable = true)]
+        public void UnsubscribeAllAlerts()
+        {
+            // --- NVR 交互伪代码 ---
+            _nvrClient.UnsubscribeAlerts();
+            // --- 伪代码结束 ---
+
+            AlertSubscribed = false;
+            NotifyPropertyChanged("nvr:alertSubscribed", new DriverEntityValue(false));
+
+            // 同步各相机告警开关
+            foreach (var cam in _cameraEntities.Values)
+            {
+                cam.UpdateAlertEnabled(false);
+            }
+        }
+
+        // ========================================================================================
+        // Programmable Commands — HDMI 联动控制
+        // ========================================================================================
+
+        [EntityCommand(Id = "nvr:enableHdmiLinkage")]
+        [EntityCommandMetadata(Programmable = true)]
+        public void EnableHdmiLinkage()
+        {
+            HdmiLinkageEnabled = true;
+            NotifyPropertyChanged("nvr:hdmiLinkageEnabled", new DriverEntityValue(true));
+        }
+
+        [EntityCommand(Id = "nvr:disableHdmiLinkage")]
+        [EntityCommandMetadata(Programmable = true)]
+        public void DisableHdmiLinkage()
+        {
+            HdmiLinkageEnabled = false;
+            NotifyPropertyChanged("nvr:hdmiLinkageEnabled", new DriverEntityValue(false));
+        }
+
+        [EntityCommand(Id = "nvr:setHdmiOutput")]
+        [EntityCommandMetadata(Programmable = true)]
+        public void SetHdmiOutput(string channelId)
+        {
+            // --- NVR 交互伪代码 ---
+            _nvrClient.SetHdmiOutputChannel(channelId);
+            // --- 伪代码结束 ---
+        }
+
+        [EntityCommand(Id = "nvr:setHdmiMultiView")]
+        [EntityCommandMetadata(Programmable = true)]
+        public void SetHdmiMultiView()
+        {
+            // --- NVR 交互伪代码 ---
+            _nvrClient.SetHdmiOutputMultiView();
+            // --- 伪代码结束 ---
+        }
+
+        [EntityCommand(Id = "nvr:resetHdmiOutput")]
+        [EntityCommandMetadata(Programmable = true)]
+        public void ResetHdmiOutput()
+        {
+            // --- NVR 交互伪代码 ---
+            _nvrClient.ResetHdmiOutput();
+            // --- 伪代码结束 ---
         }
 
         // ========================================================================================
@@ -203,6 +300,14 @@ namespace CrestronNvrDriver
         {
             if (_initialized) return;
             _initialized = true;
+
+            // 默认启用告警订阅
+            AlertSubscribed = true;
+            NotifyPropertyChanged("nvr:alertSubscribed", new DriverEntityValue(true));
+
+            // 默认关闭 HDMI 联动
+            HdmiLinkageEnabled = false;
+            NotifyPropertyChanged("nvr:hdmiLinkageEnabled", new DriverEntityValue(false));
 
             DiscoverAndRegisterCameras();
             StartAlertListener();
@@ -351,18 +456,42 @@ namespace CrestronNvrDriver
         }
 
         /// <summary>
-        /// 告警处理: 先更新属性 + NotifyPropertyChanged(), 再 Invoke() 事件
-        /// Crestron Home OS (MC4-R) 直接接收, 无需经过相机子驱动中转
+        /// 告警处理:
+        /// 1. 检查全局告警订阅开关 (AlertSubscribed)
+        /// 2. 检查该相机的告警开关 (AlertEnabled)
+        /// 3. 更新属性 + NotifyPropertyChanged()
+        /// 4. 触发 HDMI 联动 (如果启用)
+        /// 5. 触发 Programmable Event
         /// </summary>
         private void HandleNvrAlert(NvrAlertEvent alert)
         {
-            // 1. 更新告警状态属性
+            // 1. 全局告警开关检查: 未订阅则忽略所有告警
+            if (!AlertSubscribed)
+                return;
+
+            // 2. 单相机告警开关检查
+            NvrCamera camera;
+            if (_cameraEntities.TryGetValue(alert.ChannelId, out camera))
+            {
+                if (!camera.AlertEnabled)
+                    return;
+            }
+
+            // 3. 更新告警状态属性
             LastAlertType = alert.AlertType.ToString();
             LastAlertCamera = alert.CameraName;
             NotifyPropertyChanged("nvr:lastAlertType", new DriverEntityValue(LastAlertType));
             NotifyPropertyChanged("nvr:lastAlertCamera", new DriverEntityValue(LastAlertCamera));
 
-            // 2. 触发对应的 Programmable Event
+            // 4. HDMI 联动: 告警触发时自动切换 NVR HDMI 输出到告警相机画面
+            if (HdmiLinkageEnabled && !string.IsNullOrEmpty(alert.ChannelId))
+            {
+                // --- NVR 交互伪代码 ---
+                _nvrClient.SetHdmiOutputChannel(alert.ChannelId);
+                // --- 伪代码结束 ---
+            }
+
+            // 5. 触发对应的 Programmable Event
             switch (alert.AlertType)
             {
                 case AlertType.MotionDetection:

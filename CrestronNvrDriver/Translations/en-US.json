@@ -14,5 +14,15 @@
     "Armed": "Armed",
     "Disarmed": "Disarmed",
     "LedOn": "LED On",
-    "LedOff": "LED Off"
+    "LedOff": "LED Off",
+    "SubscribeAlerts": "Subscribe Alerts",
+    "UnsubscribeAlerts": "Unsubscribe Alerts",
+    "AlertSubscribed": "Alert Subscribed",
+    "AlertUnsubscribed": "Alert Unsubscribed",
+    "EnableAlert": "Enable Alert",
+    "DisableAlert": "Disable Alert",
+    "EnableHdmiLinkage": "Enable HDMI Linkage",
+    "DisableHdmiLinkage": "Disable HDMI Linkage",
+    "HdmiLinkageOn": "HDMI Linkage On",
+    "HdmiLinkageOff": "HDMI Linkage Off"
 }

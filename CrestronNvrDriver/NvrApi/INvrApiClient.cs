@@ -48,5 +48,22 @@ namespace CrestronNvrDriver.NvrApi
         event EventHandler<NvrAlertEvent> OnAlertReceived;
         void SubscribeAlerts();
         void UnsubscribeAlerts();
+
+        // ==================== 单相机告警开关 ====================
+
+        /// <summary>启用/禁用指定相机的告警上报</summary>
+        void SetCameraAlertEnabled(string channelId, bool enabled);
+        bool GetCameraAlertEnabled(string channelId);
+
+        // ==================== HDMI 输出控制 ====================
+
+        /// <summary>设置 NVR HDMI 输出显示指定相机的视频画面</summary>
+        void SetHdmiOutputChannel(string channelId);
+
+        /// <summary>设置 NVR HDMI 输出为多画面分割模式</summary>
+        void SetHdmiOutputMultiView();
+
+        /// <summary>恢复 NVR HDMI 输出为默认画面</summary>
+        void ResetHdmiOutput();
     }
 }
