@@ -41,6 +41,10 @@
       <SpecificVersion>False</SpecificVersion>
       <HintPath>..\packages\Crestron.DeviceDrivers.EntityModel\lib\Crestron.DeviceDrivers.EntityModel.dll</HintPath>
     </Reference>
+    <Reference Include="SimplSharpPro">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>..\packages\Crestron.SimplSharp\lib\SimplSharpPro.exe</HintPath>
+    </Reference>
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="$(TargetName).json" />

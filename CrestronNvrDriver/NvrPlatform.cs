@@ -3,6 +3,7 @@ using Crestron.DeviceDrivers.EntityModel.Data;
 using Crestron.DeviceDrivers.SDK;
 using Crestron.DeviceDrivers.SDK.EntityModel;
 using Crestron.DeviceDrivers.SDK.EntityModel.Attributes;
+using Crestron.SimplSharp;
 using CrestronNvrDriver.Definitions;
 using CrestronNvrDriver.NvrApi;
 using System;
